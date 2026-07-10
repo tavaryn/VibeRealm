@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>VibeRealm</title>
+  <style>
+    html, body { margin: 0; padding: 0; background: #111; overflow: hidden; }
+    #hud {
+      position: absolute; top: 10px; left: 10px; color: #fff;
+      font-family: sans-serif; font-size: 14px; z-index: 10;
+      background: rgba(0, 0, 0, 0.55); padding: 8px 12px; border-radius: 6px;
+      min-width: 140px;
+    }
+    #hud-name { font-weight: bold; margin-bottom: 2px; }
+    #xp-bar-bg { width: 160px; height: 8px; background: #333; border-radius: 4px; margin-top: 4px; overflow: hidden; }
+    #xp-bar-fill { width: 0%; height: 100%; background: #4caf50; transition: width 0.2s ease-out; }
+
+    #chat-panel {
+      position: absolute; bottom: 10px; left: 10px; z-index: 10;
+      width: 320px; font-family: sans-serif;
+    }
+    #chat-log {
+      height: 160px; overflow-y: auto; background: rgba(0, 0, 0, 0.5);
+      border-radius: 6px 6px 0 0; padding: 6px 8px; box-sizing: border-box;
+      font-size: 12px; color: #eee; line-height: 1.4;
+    }
+    #chat-log .chat-meta { color: #9ad0ff; }
+    #chat-input {
+      width: 100%; box-sizing: border-box; border: none; outline: none;
+      padding: 6px 8px; font-size: 12px; background: rgba(0, 0, 0, 0.7);
+      color: #fff; border-radius: 0 0 6px 6px;
+    }
+    #chat-input::placeholder { color: #888; }
+  </style>
+</head>
+<body>
+  <div id="hud">
+    <div id="hud-name">Connecting...</div>
+    <div id="hud-level">Level 1</div>
+    <div id="xp-bar-bg"><div id="xp-bar-fill"></div></div>
+  </div>
+  <div id="game"></div>
+  <div id="chat-panel">
+    <div id="chat-log"></div>
+    <input id="chat-input" type="text" maxlength="200" placeholder="Press Enter to chat..." autocomplete="off" />
+  </div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

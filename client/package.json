@@ -1,0 +1,18 @@
+{
+  "name": "viberealm-client",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "phaser": "^3.80.1",
+    "colyseus.js": "^0.15.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.5",
+    "vite": "^8.0.0"
+  }
+}

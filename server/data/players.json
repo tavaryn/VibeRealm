@@ -1,0 +1,50 @@
+{
+  "tavaryn": {
+    "username": "tavaryn",
+    "level": 8,
+    "xp": 235,
+    "stats": {
+      "power": 10
+    }
+  },
+  "benis": {
+    "username": "benis",
+    "level": 2,
+    "xp": 10,
+    "stats": {
+      "power": 10
+    }
+  },
+  "Hero": {
+    "username": "Hero",
+    "level": 2,
+    "xp": 50,
+    "stats": {
+      "power": 10
+    }
+  },
+  "Hero377": {
+    "username": "Hero377",
+    "level": 1,
+    "xp": 0,
+    "stats": {
+      "power": 10
+    }
+  },
+  "tavaryn22": {
+    "username": "tavaryn22",
+    "level": 1,
+    "xp": 65,
+    "stats": {
+      "power": 10
+    }
+  },
+  "BeefyBeard": {
+    "username": "BeefyBeard",
+    "level": 3,
+    "xp": 210,
+    "stats": {
+      "power": 10
+    }
+  }
+}
