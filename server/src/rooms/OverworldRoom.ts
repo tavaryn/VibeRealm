@@ -16,14 +16,17 @@ const MAX_HOSTILE_MOBS = 15; // simple population cap so mobs don't grow unbound
 const NPC_CONTACT_RADIUS = TILE_SIZE * 0.6; // how close a player must be to "touch" an NPC
 const NPC_CONTACT_COOLDOWN_MS = 1000; // avoid spamming contact events every tick while pressed against a mob
 
+type TargetType = "player" | "npc";
+
 function xpForNextLevel(level: number): number {
   return level * 100;
 }
 
 /**
  * Single shared overworld room. Server-authoritative movement + collision,
- * plus a slow passive XP timer. Kept intentionally simple for the MVP;
- * combat/skills can hook into the same simulation loop later.
+ * a slow passive XP timer, and (new) server-validated targeting. Kept
+ * intentionally simple for the MVP; combat can hook into the validated
+ * target the same way `set-target` does today (see `setPlayerTarget`).
  */
 export class OverworldRoom extends Room<OverworldState> {
   maxClients = 100;
@@ -53,6 +56,21 @@ export class OverworldRoom extends Room<OverworldState> {
         player.inputDown = !!input.down;
         player.inputLeft = !!input.left;
         player.inputRight = !!input.right;
+      }
+    );
+
+    // Targeting: client requests a target (from a click or TAB-cycle);
+    // server validates the target actually exists before committing it to
+    // the player's synced state. Passing a falsy targetId/targetType
+    // clears the current target. This is the single choke point future
+    // combat code (e.g. an "attack" message) can reuse to re-validate a
+    // player's current target before applying damage.
+    this.onMessage(
+      "set-target",
+      (client, payload: { targetId?: string | null; targetType?: TargetType | null }) => {
+        const player = this.state.players.get(client.sessionId);
+        if (!player) return;
+        this.setPlayerTarget(player, payload?.targetId ?? null, payload?.targetType ?? null);
       }
     );
 
@@ -90,6 +108,10 @@ export class OverworldRoom extends Room<OverworldState> {
     // Default stat block - just "power" for now. Combat/classes work later
     // reads/writes this map without requiring another schema change.
     player.stats.set("power", saved.stats?.power ?? 10);
+    // hp/maxHp aren't persisted yet (no combat to reduce them) - every
+    // join starts full health. Revisit once damage/death/respawn exist.
+    player.maxHp = 100;
+    player.hp = 100;
     // Simple fixed spawn point near map center for the MVP.
     player.x = Math.floor(MAP_WIDTH / 2) * TILE_SIZE;
     player.y = Math.floor(MAP_HEIGHT / 2) * TILE_SIZE;
@@ -110,8 +132,48 @@ export class OverworldRoom extends Room<OverworldState> {
       this.state.players.delete(client.sessionId);
       this.chatRateLimiter.remove(client.sessionId);
       this.npcContactCooldown.delete(client.sessionId);
+
+      // Clear anyone who had the now-departed player targeted, so their
+      // HUD target frame doesn't keep showing a target that no longer
+      // exists. NPC targets never point at a player's sessionId, so no
+      // equivalent cleanup is needed there.
+      this.state.players.forEach((otherPlayer) => {
+        if (otherPlayer.targetType === "player" && otherPlayer.targetId === client.sessionId) {
+          otherPlayer.targetId = "";
+          otherPlayer.targetType = "";
+        }
+      });
+
       console.log(`[leave] ${player.username} (saved level ${player.level}, xp ${player.xp})`);
     }
+  }
+
+  // Server-authoritative target validation. Silently ignores an invalid
+  // target (unknown id/type) rather than erroring, since a mismatch here
+  // just means a client's local candidate list was stale by a tick or two
+  // (e.g. it clicked an NPC that despawned a moment earlier).
+  private setPlayerTarget(
+    player: Player,
+    targetId: string | null,
+    targetType: TargetType | null
+  ): boolean {
+    if (!targetId || !targetType) {
+      player.targetId = "";
+      player.targetType = "";
+      return true;
+    }
+
+    if (targetType === "player") {
+      if (!this.state.players.has(targetId)) return false;
+    } else if (targetType === "npc") {
+      if (!this.state.npcs.has(targetId)) return false;
+    } else {
+      return false;
+    }
+
+    player.targetId = targetId;
+    player.targetType = targetType;
+    return true;
   }
 
   private update(deltaTime: number) {

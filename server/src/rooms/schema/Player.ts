@@ -1,27 +1,40 @@
-import { Schema, MapSchema, type } from "@colyseus/schema";
+import { Schema, type } from "@colyseus/schema";
 
 /**
- * Synced player state. Every @type() field is automatically diffed and
- * sent to clients by Colyseus - no manual broadcast code required.
+ * Player schema - core per-player synced state.
  *
- * Non-@type fields (the input flags below) live on the same object for
- * convenience but are server-only and never sent to clients.
+ * `hp`/`maxHp` are groundwork for the Combat MVP (SPEC.md roadmap #2) -
+ * not consumed by any combat logic yet, but the Targeting System's HUD
+ * needs them to render a target's HP bar, and `Npc` already has them, so
+ * adding them here now keeps the two schemas symmetric.
+ *
+ * `targetId`/`targetType` are new for the Targeting System. They ARE
+ * synced (rather than kept server-only) so any client could eventually
+ * show "who is targeting whom" (e.g. a marker above a player being
+ * targeted by someone else). Today only the local player's own target is
+ * consumed client-side, to drive the target HUD frame.
  */
 export class Player extends Schema {
-  @type("string") id: string = "";
-  @type("string") username: string = "Player";
-  @type("number") x: number = 0;
-  @type("number") y: number = 0;
-  @type("number") level: number = 1;
-  @type("number") xp: number = 0;
+  @type("string") id = "";
+  @type("string") username = "";
+  @type("number") x = 0;
+  @type("number") y = 0;
+  @type("number") level = 1;
+  @type("number") xp = 0;
+  @type("number") hp = 100;
+  @type("number") maxHp = 100;
+  @type({ map: "number" }) stats = new Map<string, number>();
 
-  // Extensible stat block (e.g. power) per SPEC.md Section 4. Empty keys
-  // are fine to add later - combat/classes work will read/write this
-  // without needing another schema migration.
-  @type({ map: "number" }) stats = new MapSchema<number>();
+  // "" = no target. Empty string instead of null/undefined since Schema
+  // string fields don't support null, and it keeps client checks simple
+  // (`if (player.targetId) { ... }`).
+  @type("string") targetId = "";
+  // "player" | "npc" | "" (no target). Plain string rather than an enum
+  // type for Schema-encoding simplicity; validated server-side in
+  // OverworldRoom before ever being set.
+  @type("string") targetType = "";
 
-  // Server-only input state, updated by the "move" message handler and
-  // consumed each simulation tick in OverworldRoom.
+  // Server-only movement input flags, never synced to clients.
   inputUp = false;
   inputDown = false;
   inputLeft = false;

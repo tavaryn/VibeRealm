@@ -1,26 +1,28 @@
-import { Schema, MapSchema, type } from "@colyseus/schema";
+import { Schema, type } from "@colyseus/schema";
 
 /**
- * Generic NPC/mob state, synced the same way Player is - Colyseus diffs
- * this automatically so clients only receive changes, not full snapshots.
- *
- * `behavior` is a placeholder for future AI (e.g. "patrol", "aggro",
- * "flee"). NPCs are static for the MVP - the field exists now so adding
- * real AI later doesn't require another schema change.
+ * NPC schema. `targetId`/`targetType` are intentionally NOT @type-decorated:
+ * per the Targeting System requirements, NPC targets don't need client-side
+ * display yet, so keeping them as plain (unsynced) server-side fields costs
+ * zero sync bandwidth. They're still fully server-authoritative from day
+ * one and ready for future aggro/chase AI to read/write - see SPEC.md
+ * roadmap #3 - without any schema migration when that AI is built.
  */
 export class Npc extends Schema {
-  @type("string") id: string = "";
-  @type("string") name: string = "Mob";
-  @type("number") level: number = 1;
-  @type("number") hp: number = 10;
-  @type("number") maxHp: number = 10;
-  @type("boolean") isHostile: boolean = false;
-  @type("number") x: number = 0;
-  @type("number") y: number = 0;
+  @type("string") id = "";
+  @type("string") name = "";
+  @type("number") x = 0;
+  @type("number") y = 0;
+  @type("number") level = 1;
+  @type("number") hp = 50;
+  @type("number") maxHp = 50;
+  @type("boolean") isHostile = true;
+  @type({ map: "number" }) stats = new Map<string, number>();
+  @type("string") behavior = "static";
 
-  // Extensible stat block, same pattern as Player.stats.
-  @type({ map: "number" }) stats = new MapSchema<number>();
-
-  // Future AI hook - unused for now beyond being informational.
-  @type("string") behavior: string = "static";
+  // Server-only, unsynced - see class comment above. "self" is included
+  // in the union now so a future AI state machine can represent an NPC
+  // idling/guarding its own spawn point without a special-case value.
+  targetId = "";
+  targetType: "player" | "npc" | "self" | "" = "";
 }

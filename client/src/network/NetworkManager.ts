@@ -16,6 +16,8 @@ export interface MoveInput {
   right: boolean;
 }
 
+export type TargetType = "player" | "npc";
+
 /**
  * Thin wrapper around colyseus.js so the rest of the client never talks
  * to the SDK directly. Makes it easy to swap rooms later (e.g. joining a
@@ -40,5 +42,12 @@ export class NetworkManager {
 
   sendChat(text: string) {
     this.room?.send("chat", { text });
+  }
+
+  // Server validates the target actually exists before committing it (see
+  // OverworldRoom.setPlayerTarget) - this is a request, not a guarantee.
+  // Pass null/null to clear the current target.
+  sendSetTarget(targetId: string | null, targetType: TargetType | null) {
+    this.room?.send("set-target", { targetId, targetType });
   }
 }

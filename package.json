@@ -1,0 +1,23 @@
+{
+  "name": "viberealm",
+  "version": "0.0.4",
+  "description": "VibeRealm",
+  "keywords": [
+    "VibeRealm"
+  ],
+  "homepage": "https://github.com/tavaryn/VibeRealm#readme",
+  "bugs": {
+    "url": "https://github.com/tavaryn/VibeRealm/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tavaryn/VibeRealm.git"
+  },
+  "license": "ISC",
+  "author": "tavaryn",
+  "type": "commonjs",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  }
+}

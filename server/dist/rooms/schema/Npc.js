@@ -12,68 +12,71 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.Npc = void 0;
 const schema_1 = require("@colyseus/schema");
 /**
- * Generic NPC/mob state, synced the same way Player is - Colyseus diffs
- * this automatically so clients only receive changes, not full snapshots.
- *
- * `behavior` is a placeholder for future AI (e.g. "patrol", "aggro",
- * "flee"). NPCs are static for the MVP - the field exists now so adding
- * real AI later doesn't require another schema change.
+ * NPC schema. `targetId`/`targetType` are intentionally NOT @type-decorated:
+ * per the Targeting System requirements, NPC targets don't need client-side
+ * display yet, so keeping them as plain (unsynced) server-side fields costs
+ * zero sync bandwidth. They're still fully server-authoritative from day
+ * one and ready for future aggro/chase AI to read/write - see SPEC.md
+ * roadmap #3 - without any schema migration when that AI is built.
  */
 class Npc extends schema_1.Schema {
     constructor() {
         super(...arguments);
         this.id = "";
-        this.name = "Mob";
-        this.level = 1;
-        this.hp = 10;
-        this.maxHp = 10;
-        this.isHostile = false;
+        this.name = "";
         this.x = 0;
         this.y = 0;
-        // Extensible stat block, same pattern as Player.stats.
-        this.stats = new schema_1.MapSchema();
-        // Future AI hook - unused for now beyond being informational.
+        this.level = 1;
+        this.hp = 50;
+        this.maxHp = 50;
+        this.isHostile = true;
+        this.stats = new Map();
         this.behavior = "static";
+        // Server-only, unsynced - see class comment above. "self" is included
+        // in the union now so a future AI state machine can represent an NPC
+        // idling/guarding its own spawn point without a special-case value.
+        this.targetId = "";
+        this.targetType = "";
     }
 }
 exports.Npc = Npc;
 __decorate([
     (0, schema_1.type)("string"),
-    __metadata("design:type", String)
+    __metadata("design:type", Object)
 ], Npc.prototype, "id", void 0);
 __decorate([
     (0, schema_1.type)("string"),
-    __metadata("design:type", String)
+    __metadata("design:type", Object)
 ], Npc.prototype, "name", void 0);
 __decorate([
     (0, schema_1.type)("number"),
-    __metadata("design:type", Number)
-], Npc.prototype, "level", void 0);
-__decorate([
-    (0, schema_1.type)("number"),
-    __metadata("design:type", Number)
-], Npc.prototype, "hp", void 0);
-__decorate([
-    (0, schema_1.type)("number"),
-    __metadata("design:type", Number)
-], Npc.prototype, "maxHp", void 0);
-__decorate([
-    (0, schema_1.type)("boolean"),
-    __metadata("design:type", Boolean)
-], Npc.prototype, "isHostile", void 0);
-__decorate([
-    (0, schema_1.type)("number"),
-    __metadata("design:type", Number)
+    __metadata("design:type", Object)
 ], Npc.prototype, "x", void 0);
 __decorate([
     (0, schema_1.type)("number"),
-    __metadata("design:type", Number)
+    __metadata("design:type", Object)
 ], Npc.prototype, "y", void 0);
+__decorate([
+    (0, schema_1.type)("number"),
+    __metadata("design:type", Object)
+], Npc.prototype, "level", void 0);
+__decorate([
+    (0, schema_1.type)("number"),
+    __metadata("design:type", Object)
+], Npc.prototype, "hp", void 0);
+__decorate([
+    (0, schema_1.type)("number"),
+    __metadata("design:type", Object)
+], Npc.prototype, "maxHp", void 0);
+__decorate([
+    (0, schema_1.type)("boolean"),
+    __metadata("design:type", Object)
+], Npc.prototype, "isHostile", void 0);
 __decorate([
     (0, schema_1.type)({ map: "number" }),
     __metadata("design:type", Object)
 ], Npc.prototype, "stats", void 0);
 __decorate([
     (0, schema_1.type)("string"),
-    __metadata("design:type", String)
+    __metadata("design:type", Object)
 ], Npc.prototype, "behavior", void 0);

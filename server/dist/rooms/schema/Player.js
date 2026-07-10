@@ -12,27 +12,40 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.Player = void 0;
 const schema_1 = require("@colyseus/schema");
 /**
- * Synced player state. Every @type() field is automatically diffed and
- * sent to clients by Colyseus - no manual broadcast code required.
+ * Player schema - core per-player synced state.
  *
- * Non-@type fields (the input flags below) live on the same object for
- * convenience but are server-only and never sent to clients.
+ * `hp`/`maxHp` are groundwork for the Combat MVP (SPEC.md roadmap #2) -
+ * not consumed by any combat logic yet, but the Targeting System's HUD
+ * needs them to render a target's HP bar, and `Npc` already has them, so
+ * adding them here now keeps the two schemas symmetric.
+ *
+ * `targetId`/`targetType` are new for the Targeting System. They ARE
+ * synced (rather than kept server-only) so any client could eventually
+ * show "who is targeting whom" (e.g. a marker above a player being
+ * targeted by someone else). Today only the local player's own target is
+ * consumed client-side, to drive the target HUD frame.
  */
 class Player extends schema_1.Schema {
     constructor() {
         super(...arguments);
         this.id = "";
-        this.username = "Player";
+        this.username = "";
         this.x = 0;
         this.y = 0;
         this.level = 1;
         this.xp = 0;
-        // Extensible stat block (e.g. power) per SPEC.md Section 4. Empty keys
-        // are fine to add later - combat/classes work will read/write this
-        // without needing another schema migration.
-        this.stats = new schema_1.MapSchema();
-        // Server-only input state, updated by the "move" message handler and
-        // consumed each simulation tick in OverworldRoom.
+        this.hp = 100;
+        this.maxHp = 100;
+        this.stats = new Map();
+        // "" = no target. Empty string instead of null/undefined since Schema
+        // string fields don't support null, and it keeps client checks simple
+        // (`if (player.targetId) { ... }`).
+        this.targetId = "";
+        // "player" | "npc" | "" (no target). Plain string rather than an enum
+        // type for Schema-encoding simplicity; validated server-side in
+        // OverworldRoom before ever being set.
+        this.targetType = "";
+        // Server-only movement input flags, never synced to clients.
         this.inputUp = false;
         this.inputDown = false;
         this.inputLeft = false;
@@ -42,29 +55,45 @@ class Player extends schema_1.Schema {
 exports.Player = Player;
 __decorate([
     (0, schema_1.type)("string"),
-    __metadata("design:type", String)
+    __metadata("design:type", Object)
 ], Player.prototype, "id", void 0);
 __decorate([
     (0, schema_1.type)("string"),
-    __metadata("design:type", String)
+    __metadata("design:type", Object)
 ], Player.prototype, "username", void 0);
 __decorate([
     (0, schema_1.type)("number"),
-    __metadata("design:type", Number)
+    __metadata("design:type", Object)
 ], Player.prototype, "x", void 0);
 __decorate([
     (0, schema_1.type)("number"),
-    __metadata("design:type", Number)
+    __metadata("design:type", Object)
 ], Player.prototype, "y", void 0);
 __decorate([
     (0, schema_1.type)("number"),
-    __metadata("design:type", Number)
+    __metadata("design:type", Object)
 ], Player.prototype, "level", void 0);
 __decorate([
     (0, schema_1.type)("number"),
-    __metadata("design:type", Number)
+    __metadata("design:type", Object)
 ], Player.prototype, "xp", void 0);
+__decorate([
+    (0, schema_1.type)("number"),
+    __metadata("design:type", Object)
+], Player.prototype, "hp", void 0);
+__decorate([
+    (0, schema_1.type)("number"),
+    __metadata("design:type", Object)
+], Player.prototype, "maxHp", void 0);
 __decorate([
     (0, schema_1.type)({ map: "number" }),
     __metadata("design:type", Object)
 ], Player.prototype, "stats", void 0);
+__decorate([
+    (0, schema_1.type)("string"),
+    __metadata("design:type", Object)
+], Player.prototype, "targetId", void 0);
+__decorate([
+    (0, schema_1.type)("string"),
+    __metadata("design:type", Object)
+], Player.prototype, "targetType", void 0);
