@@ -1,8 +1,9 @@
 import Phaser from "phaser";
-import { NetworkManager, TargetType } from "../network/NetworkManager";
+import { NetworkManager, TargetType, MoveInput } from "../network/NetworkManager";
 import { ChatUI } from "../ui/ChatUI";
 import { TargetFrame } from "../ui/TargetFrame";
 import { TILE_SIZE, MAP_WIDTH, MAP_HEIGHT, tileMap } from "../map/mapData";
+import { simulateMove } from "../network/predictedMovement";
 
 interface PlayerVisual {
   container: Phaser.GameObjects.Container;
@@ -28,6 +29,16 @@ interface TargetCandidate {
   y: number;
 }
 
+// One entry per locally-simulated prediction step (see stepPrediction).
+// Recorded so that when a "move-ack" arrives, we can discard the steps it
+// already accounts for and replay only the ones simulated since - see
+// reconcileFromAck().
+interface PredictionHistoryEntry {
+  seq: number;
+  input: MoveInput;
+  dt: number;
+}
+
 export class GameScene extends Phaser.Scene {
   private network = new NetworkManager();
   private playerVisuals = new Map<string, PlayerVisual>();
@@ -50,6 +61,28 @@ export class GameScene extends Phaser.Scene {
   // fully server-authoritative, no optimistic client-side guessing.
   private currentTargetId = "";
   private currentTargetType: TargetType | "" = "";
+
+  // --- Client-side prediction state (local player only) ---
+  // predictedX/Y is what actually drives the local player's on-screen
+  // position every frame now, instead of the lerp-toward-server-state used
+  // for remote players. serverX/Y is the latest confirmed position from
+  // the normal Schema sync, used for gentle continuous correction. seq/
+  // history support the sharper ack-based replay correction that fires
+  // right when an input change is confirmed - see the big comment block
+  // above reconcileFromAck() for why both exist.
+  private predictedX = 0;
+  private predictedY = 0;
+  private serverX = 0;
+  private serverY = 0;
+  private inputSeq = 0;
+  private inputHistory: PredictionHistoryEntry[] = [];
+
+
+  // Tuning constants for reconciliation - see applyServerCorrection().
+  private static readonly SNAP_THRESHOLD = TILE_SIZE * 1.5; // big desync -> snap instantly (rejoin, teleport)
+  private static readonly CORRECTION_RATE = 0.15; // gentle per-frame pull for small, expected drift
+  private static readonly MAX_FRAME_DELTA_MS = 250; // clamp guard against huge jumps (e.g. backgrounded tab)
+  private static readonly MAX_HISTORY_ENTRIES = 200; // ~10s at 20Hz - bounds memory if acks stop arriving
 
   constructor() {
     super("GameScene");
@@ -148,6 +181,15 @@ export class GameScene extends Phaser.Scene {
         if (sessionId === this.localSessionId) {
           this.updateHud(player.username, player.level, player.xp);
 
+          // Latest authoritative reference point, used by
+          // applyServerCorrection() for gentle continuous drift
+          // correction. NOT applied directly to the container - the
+          // container's position is driven every frame by predictedX/Y
+          // in stepPrediction(), so a stale/late patch here can never
+          // cause a visible jump on its own.
+          this.serverX = player.x;
+          this.serverY = player.y;
+
           // Track our own confirmed target and refresh the frame. Reading
           // this off the Schema (rather than a local click-time guess)
           // keeps the target frame authoritative - if the server rejected
@@ -214,6 +256,14 @@ export class GameScene extends Phaser.Scene {
         this.showToast(`${prefix}Bumped into ${msg.npcName}!`, msg.isHostile ? "211,47,47" : "255,179,0");
       }
     );
+
+    // Client-side prediction reconciliation: the server echoes back the
+    // seq we tagged an outbound "move" message with, plus our confirmed
+    // position as of processing that input change. See reconcileFromAck()
+    // for the replay logic this drives.
+    room.onMessage("move-ack", (msg: { seq: number; x: number; y: number }) => {
+      this.reconcileFromAck(msg);
+    });
   }
 
   private addPlayerVisual(sessionId: string, player: any) {
@@ -240,6 +290,14 @@ export class GameScene extends Phaser.Scene {
     }
 
     if (isLocal) {
+      // Seed prediction state from our spawn position so the very first
+      // frame doesn't jump - predictedX/Y (not player.x/y) drives this
+      // container from here on out, see stepPrediction().
+      this.predictedX = player.x;
+      this.predictedY = player.y;
+      this.serverX = player.x;
+      this.serverY = player.y;
+
       this.cameras.main.startFollow(container, true, 0.15, 0.15);
       this.updateHud(player.username, player.level, player.xp);
     }
@@ -339,9 +397,14 @@ export class GameScene extends Phaser.Scene {
     this.setTarget(next.id, next.type);
   }
 
+  // Now reads from predictedX/Y (the local player's actual rendered
+  // position) rather than the container directly, though at present these
+  // are the same thing every frame - kept as a named accessor since
+  // "where's the local player" is a meaningful concept future systems
+  // (e.g. melee range checks) will also want.
   private getLocalPlayerPosition(): { x: number; y: number } | undefined {
-    const visual = this.playerVisuals.get(this.localSessionId);
-    return visual ? { x: visual.container.x, y: visual.container.y } : undefined;
+    if (!this.playerVisuals.has(this.localSessionId)) return undefined;
+    return { x: this.predictedX, y: this.predictedY };
   }
 
   // Reads whatever we're currently targeting straight from Schema state
@@ -372,8 +435,9 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  update() {
+  update(_time: number, delta: number) {
     this.handleInput();
+    this.stepPrediction(delta);
     this.interpolateVisuals();
     this.refreshTargetFrame();
   }
@@ -407,7 +471,13 @@ export class GameScene extends Phaser.Scene {
 
     if (changed) {
       this.lastInput = input;
-      this.network.sendInput(input);
+      // Tag with the current seq BEFORE stepPrediction() advances it this
+      // frame - this seq represents "everything simulated up to here used
+      // the OLD input." The server echoes it back once processed, and
+      // reconcileFromAck() replays every step recorded AFTER this seq
+      // (which will all have used the NEW input) on top of the server's
+      // confirmed position. See predictedMovement.ts's header comment.
+      this.network.sendInput(input, this.inputSeq);
     }
   }
 
@@ -417,15 +487,112 @@ export class GameScene extends Phaser.Scene {
       this.lastInput.up || this.lastInput.down || this.lastInput.left || this.lastInput.right;
     if (wasMoving) {
       this.lastInput = stopped;
-      this.network.sendInput(stopped);
+      this.network.sendInput(stopped, this.inputSeq);
     }
   }
 
+
+  private stepPrediction(delta: number) {
+  if (!this.network.room || !this.playerVisuals.has(this.localSessionId)) return;
+  if (this.chatUI.isFocused()) return; // movement is suppressed while typing, mirroring the server
+
+  // Simulate every rendered frame directly with that frame's real delta,
+  // rather than batching into fixed 50ms chunks. Batching was matched to
+  // the server's 20Hz tick for reconciliation accuracy, but it meant the
+  // local player's on-screen position only actually changed ~20 times/sec
+  // - visually choppy, even though input itself was still instant.
+  // Reconciliation doesn't care what step size was used (each history
+  // entry stores its own dt - see simulateLocalStep), so per-frame
+  // variable-dt stepping is simulation-fair and fixes the smoothness.
+  const clampedDelta = Math.min(delta, GameScene.MAX_FRAME_DELTA_MS);
+  this.simulateLocalStep(clampedDelta / 1000);
+
+  this.applyServerCorrection();
+
+  const visual = this.playerVisuals.get(this.localSessionId);
+  if (visual) {
+    visual.container.x = this.predictedX;
+    visual.container.y = this.predictedY;
+  }
+}
+
+  private simulateLocalStep(dt: number) {
+    this.inputSeq++;
+    const input: MoveInput = { ...this.lastInput };
+
+    this.inputHistory.push({ seq: this.inputSeq, input, dt });
+    if (this.inputHistory.length > GameScene.MAX_HISTORY_ENTRIES) {
+      this.inputHistory.splice(0, this.inputHistory.length - GameScene.MAX_HISTORY_ENTRIES);
+    }
+
+    const result = simulateMove(this.predictedX, this.predictedY, input, dt);
+    this.predictedX = result.x;
+    this.predictedY = result.y;
+  }
+
+  // Gentle, continuous pull of the prediction toward the latest confirmed
+  // server position (updated on every local-player onChange, i.e. roughly
+  // every tick the server actually moved us). This is what catches drift
+  // that isn't tied to a specific input-change message - e.g. holding a
+  // movement key into a wall for a while, where minor differences between
+  // the client's and server's per-tick collision resolution could
+  // otherwise slowly accumulate. Small errors get nudged in smoothly;
+  // large ones (rejoining, a future teleport/respawn) snap immediately
+  // rather than visibly sliding across the map.
+private applyServerCorrection() {
+  const errX = this.serverX - this.predictedX;
+  const errY = this.serverY - this.predictedY;
+  const dist = Math.hypot(errX, errY);
+
+  if (dist > GameScene.SNAP_THRESHOLD) {
+    this.predictedX = this.serverX;
+    this.predictedY = this.serverY;
+  } else if (dist > 1.5) { // was 0.25 - ignore sub-pixel noise near walls
+    this.predictedX += errX * GameScene.CORRECTION_RATE;
+    this.predictedY += errY * GameScene.CORRECTION_RATE;
+  }
+}
+
+// Fires when a "move-ack" arrives (see connectToServer). `ack.x/y` is the
+// server's authoritative position at the moment it processed the input
+// change we tagged with `ack.seq` - note this reflects the server having
+// kept simulating with the *previous* input for the entire network
+// round-trip (it doesn't know about our new input until this message
+// arrives), so it can legitimately be further along than where we
+// visually stopped/turned locally. That's expected, not drift to hide -
+// but it means writing it straight into predictedX/Y would produce a
+// visible pop exactly when stopping or changing direction.
+//
+// Instead: replay every history entry recorded after this ack's seq (the
+// steps we predicted locally after sending this input change) on top of
+// ack.x/y to get our best current estimate of the true position, then
+// hand that to serverX/Y - the same reference applyServerCorrection()
+// already blends predictedX/Y toward every frame. This folds ack-driven
+// correction into the same smooth catch-up as ordinary onChange-driven
+// correction, instead of a separate instant snap.
+private reconcileFromAck(ack: { seq: number; x: number; y: number }) {
+  this.inputHistory = this.inputHistory.filter((entry) => entry.seq > ack.seq);
+
+  let x = ack.x;
+  let y = ack.y;
+  for (const entry of this.inputHistory) {
+    const result = simulateMove(x, y, entry.input, entry.dt);
+    x = result.x;
+    y = result.y;
+  }
+
+  this.serverX = x;
+  this.serverY = y;
+}
+
   private interpolateVisuals() {
-    // Smoothly move every visual (including the local player, for MVP
-    // simplicity) toward its latest server-confirmed position. True
-    // client-side prediction for the local player is a good follow-up.
-    this.playerVisuals.forEach((visual) => {
+    // Remote players still interpolate toward the last synced position -
+    // unchanged. The local player is deliberately skipped here: its
+    // container position is driven directly by predictedX/Y in
+    // stepPrediction() every frame, which is what makes its movement feel
+    // instant instead of lerped.
+    this.playerVisuals.forEach((visual, sessionId) => {
+      if (sessionId === this.localSessionId) return;
       visual.container.x = Phaser.Math.Linear(visual.container.x, visual.targetX, 0.25);
       visual.container.y = Phaser.Math.Linear(visual.container.y, visual.targetY, 0.25);
     });

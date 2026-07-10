@@ -24,9 +24,12 @@ function xpForNextLevel(level: number): number {
 
 /**
  * Single shared overworld room. Server-authoritative movement + collision,
- * a slow passive XP timer, and (new) server-validated targeting. Kept
- * intentionally simple for the MVP; combat can hook into the validated
- * target the same way `set-target` does today (see `setPlayerTarget`).
+ * a slow passive XP timer, server-validated targeting, and (new) a small
+ * unicast ack on movement input to support client-side prediction -
+ * see the "move" handler below and client GameScene.reconcileFromAck.
+ * Kept intentionally simple for the MVP; combat can hook into the
+ * validated target the same way `set-target` does today (see
+ * `setPlayerTarget`).
  */
 export class OverworldRoom extends Room<OverworldState> {
   maxClients = 100;
@@ -49,13 +52,28 @@ export class OverworldRoom extends Room<OverworldState> {
 
     this.onMessage(
       "move",
-      (client, input: { up: boolean; down: boolean; left: boolean; right: boolean }) => {
+      (
+        client,
+        input: { up: boolean; down: boolean; left: boolean; right: boolean; seq?: number }
+      ) => {
         const player = this.state.players.get(client.sessionId);
         if (!player) return;
         player.inputUp = !!input.up;
         player.inputDown = !!input.down;
         player.inputLeft = !!input.left;
         player.inputRight = !!input.right;
+
+        // Client-side prediction support: echo back the seq the client
+        // tagged this input change with, plus this player's authoritative
+        // position *right now* (i.e. before the new input flags above
+        // take effect on the next simulation tick). The client uses this
+        // to discard/replay its local prediction history and correct any
+        // drift without a visible jump - see GameScene.reconcileFromAck().
+        // Unicast (client.send), not broadcast - no other client needs
+        // this, and it costs nothing beyond the client's own round-trip.
+        if (typeof input.seq === "number") {
+          client.send("move-ack", { seq: input.seq, x: player.x, y: player.y });
+        }
       }
     );
 

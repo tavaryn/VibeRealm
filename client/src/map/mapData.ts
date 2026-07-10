@@ -1,8 +1,10 @@
 /**
- * Client copy of the overworld tile map, used only for rendering.
- * MUST stay in sync with server/src/map/mapData.ts - the server is the
- * source of truth for collision. See the note in that file for the
- * plan to de-duplicate this once maps become dynamic.
+ * Client copy of the overworld tile map, used only for rendering AND (new)
+ * client-side movement prediction. MUST stay in sync with
+ * server/src/map/mapData.ts - the server remains the source of truth for
+ * collision; this copy just lets the client *guess* the same result ahead
+ * of the server's confirmation. See the note in that file for the plan to
+ * de-duplicate this once maps become dynamic.
  */
 export const TILE_SIZE = 32;
 export const MAP_WIDTH = 30;
@@ -34,4 +36,16 @@ function generateMap(): number[][] {
   }
 
   return map;
+}
+
+/**
+ * Tile-grid walkability check, used by the new client-side prediction
+ * module (predictedMovement.ts) so the client's local movement guess uses
+ * the exact same rule as the server's collision check. Out-of-bounds
+ * tiles are treated as not walkable (matches border walls anyway, but
+ * this guards against negative/overflowing indices too).
+ */
+export function isWalkable(tileX: number, tileY: number): boolean {
+  if (tileY < 0 || tileY >= MAP_HEIGHT || tileX < 0 || tileX >= MAP_WIDTH) return false;
+  return tileMap[tileY][tileX] === 0;
 }

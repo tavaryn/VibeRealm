@@ -36,8 +36,14 @@ export class NetworkManager {
     return this.room;
   }
 
-  sendInput(input: MoveInput) {
-    this.room?.send("move", input);
+  // `seq` is the client's local prediction step counter at the moment this
+  // input change was sent (see GameScene.handleInput/stepPrediction). The
+  // server echoes it back in a "move-ack" message so the client can
+  // reconcile its predicted position against the server's confirmed one -
+  // see GameScene.reconcileFromAck. Purely a client-feel mechanism; the
+  // server doesn't use `seq` for anything but the echo.
+  sendInput(input: MoveInput, seq: number) {
+    this.room?.send("move", { ...input, seq });
   }
 
   sendChat(text: string) {
