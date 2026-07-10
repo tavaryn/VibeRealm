@@ -5,6 +5,90 @@
   <title>VibeRealm</title>
   <style>
     html, body { margin: 0; padding: 0; background: #111; overflow: hidden; }
+
+    /* ---------- Login Screen ----------
+       Full-viewport overlay, sits above the game (z-index 100 vs the
+       game HUD's z-index 10). Shown on load and again on disconnect;
+       hidden once a room join succeeds (see LoginScreen.ts / GameScene). */
+    #login-screen {
+      position: fixed;
+      inset: 0;
+      z-index: 100;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: linear-gradient(160deg, #1b1f2b, #0d0f14);
+      font-family: sans-serif;
+    }
+    #login-box {
+      width: 300px;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 12px;
+      padding: 32px 36px;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+    }
+    #login-box h1 {
+      color: #fff;
+      font-size: 22px;
+      margin: 0 0 4px;
+      text-align: center;
+    }
+    #login-box p.subtitle {
+      color: #9ad0ff;
+      font-size: 12px;
+      text-align: center;
+      margin: 0 0 20px;
+    }
+    #login-box label {
+      color: #ccc;
+      font-size: 12px;
+      display: block;
+      margin-bottom: 4px;
+    }
+    #login-username {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 10px 12px;
+      margin-bottom: 14px;
+      border-radius: 6px;
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      background: rgba(0, 0, 0, 0.35);
+      color: #fff;
+      font-size: 14px;
+      outline: none;
+    }
+    #login-username:focus { border-color: #42a5f5; }
+    #login-username::placeholder { color: #777; }
+
+    /* Placeholder for future password auth - not wired up yet, but the
+       markup/CSS slot already exists so adding it later is a small diff.
+       Kept hidden and unused for MVP. */
+    #login-password-row { display: none; }
+
+    #login-submit {
+      width: 100%;
+      padding: 10px 12px;
+      border: none;
+      border-radius: 6px;
+      background: #42a5f5;
+      color: #fff;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s ease;
+    }
+    #login-submit:hover:not(:disabled) { background: #2f8ee0; }
+    #login-submit:disabled { background: #2a4a63; cursor: default; }
+    #login-error {
+      color: #ef5350;
+      font-size: 12px;
+      margin-top: 10px;
+      min-height: 14px;
+      text-align: center;
+    }
+
+    /* ---------- Existing game HUD ---------- */
     #hud {
       position: absolute; top: 10px; left: 10px; color: #fff;
       font-family: sans-serif; font-size: 14px; z-index: 10;
@@ -15,8 +99,6 @@
     #xp-bar-bg { width: 160px; height: 8px; background: #333; border-radius: 4px; margin-top: 4px; overflow: hidden; }
     #xp-bar-fill { width: 0%; height: 100%; background: #4caf50; transition: width 0.2s ease-out; }
 
-    /* Target frame: top-right, mirrors the HUD's look. Hidden by default
-       until a target is selected (see TargetFrame.clear()/.update()). */
     #target-frame {
       position: absolute; top: 10px; right: 10px; color: #fff;
       font-family: sans-serif; font-size: 14px; z-index: 10;
@@ -49,6 +131,33 @@
   </style>
 </head>
 <body>
+  <!-- Login screen: shown on load, and again on disconnect. Hidden by
+       LoginScreen.ts once GameScene confirms a room join. -->
+  <div id="login-screen">
+    <div id="login-box">
+      <h1>VibeRealm</h1>
+      <p class="subtitle">Enter the overworld</p>
+      <form id="login-form">
+        <label for="login-username">Username</label>
+        <input
+          id="login-username"
+          type="text"
+          maxlength="16"
+          autocomplete="off"
+          placeholder="Hero"
+          autofocus
+        />
+        <!-- Reserved slot for future password auth -->
+        <div id="login-password-row">
+          <label for="login-password">Password</label>
+          <input id="login-password" type="password" autocomplete="off" />
+        </div>
+        <button id="login-submit" type="submit">Enter World</button>
+        <div id="login-error"></div>
+      </form>
+    </div>
+  </div>
+
   <div id="hud">
     <div id="hud-name">Connecting...</div>
     <div id="hud-level">Level 1</div>

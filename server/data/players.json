@@ -2,7 +2,7 @@
   "tavaryn": {
     "username": "tavaryn",
     "level": 8,
-    "xp": 400,
+    "xp": 490,
     "stats": {
       "power": 10
     }
@@ -18,7 +18,7 @@
   "Hero": {
     "username": "Hero",
     "level": 2,
-    "xp": 50,
+    "xp": 60,
     "stats": {
       "power": 10
     }

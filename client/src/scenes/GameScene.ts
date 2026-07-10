@@ -2,6 +2,7 @@ import Phaser from "phaser";
 import { NetworkManager, TargetType, MoveInput } from "../network/NetworkManager";
 import { ChatUI } from "../ui/ChatUI";
 import { TargetFrame } from "../ui/TargetFrame";
+import { LoginScreen } from "../ui/LoginScreen";
 import { TILE_SIZE, MAP_WIDTH, MAP_HEIGHT, tileMap } from "../map/mapData";
 import { simulateMove } from "../network/predictedMovement";
 
@@ -54,6 +55,13 @@ export class GameScene extends Phaser.Scene {
   private lastInput = { up: false, down: false, left: false, right: false };
   private chatUI!: ChatUI;
   private targetFrame!: TargetFrame;
+  private loginScreen!: LoginScreen;
+
+  // True only between a successful room join and that room disconnecting
+  // (see connectToServer/handleDisconnect). Gates the whole per-frame game
+  // loop (see update()) and outbound target/chat sends, so nothing tries
+  // to talk to a closed/absent room while the login screen is showing.
+  private isConnected = false;
 
   // Mirrors the local player's own synced targetId/targetType (updated via
   // that player's onChange, same as the HUD). This is the single source of
@@ -91,9 +99,18 @@ export class GameScene extends Phaser.Scene {
   create() {
     this.drawMap();
     this.setupInput();
-    this.chatUI = new ChatUI((text) => this.network.sendChat(text));
+    this.chatUI = new ChatUI((text) => {
+      if (this.isConnected) this.network.sendChat(text);
+    });
     this.targetFrame = new TargetFrame();
-    this.connectToServer();
+
+    // Game setup (map, input, HUD modules) happens immediately as before,
+    // but we no longer auto-connect with a window.prompt(). Instead the
+    // login screen (visible by default - see index.html) collects a
+    // username and calls back into connectToServer() on submit. The
+    // canvas renders underneath the login overlay the whole time, which
+    // is harmless since nothing moves until a room join succeeds.
+    this.loginScreen = new LoginScreen((username) => this.connectToServer(username));
   }
 
   private drawMap() {
@@ -149,9 +166,10 @@ export class GameScene extends Phaser.Scene {
     // called on it (even with a no-op handler) to be excluded here
     // automatically. An empty list means the click landed on bare map
     // (grass/dirt/water/wall) with nothing interactive under it, so we
-    // clear the target. HTML overlays (HUD, chat, target frame, and any
-    // future DOM-based UI) never reach this handler at all, since a click
-    // on them never reaches the canvas underneath - no extra guard needed.
+    // clear the target. HTML overlays (HUD, chat, target frame, login
+    // screen, and any future DOM-based UI) never reach this handler at
+    // all, since a click on them never reaches the canvas underneath - no
+    // extra guard needed.
     this.input.on(
       "pointerdown",
       (_pointer: Phaser.Input.Pointer, currentlyOver: Phaser.GameObjects.GameObject[]) => {
@@ -162,108 +180,173 @@ export class GameScene extends Phaser.Scene {
     );
   }
 
-  private async connectToServer() {
-    const username =
-      window.prompt("Enter a username:", "Hero") || `Hero${Math.floor(Math.random() * 1000)}`;
-    const room = await this.network.connect(username);
-    this.localSessionId = room.sessionId;
+  // Called once the login screen submits a username. Wrapped in try/catch
+  // so a failed join (server down, network hiccup) shows an inline error
+  // on the login screen instead of silently hanging or throwing to the
+  // console with no player-visible feedback.
+  private async connectToServer(username: string) {
+    try {
+      const room = await this.network.connect(username);
+      this.localSessionId = room.sessionId;
+      this.isConnected = true;
 
-    room.state.players.onAdd((player: any, sessionId: string) => {
-      this.addPlayerVisual(sessionId, player);
+      // Disconnect handling: fires whether the player was kicked, the
+      // server crashed/restarted, or the connection just dropped. `code`
+      // follows the WebSocket close-code convention - logged for now, not
+      // yet differentiated (e.g. "kicked" vs "network drop") for the
+      // player. See handleDisconnect() for the cleanup/return-to-login
+      // flow this triggers.
+      room.onLeave((code: number) => {
+        this.handleDisconnect(code);
+      });
 
-      player.onChange(() => {
+      room.state.players.onAdd((player: any, sessionId: string) => {
+        this.addPlayerVisual(sessionId, player);
+
+        player.onChange(() => {
+          const visual = this.playerVisuals.get(sessionId);
+          if (!visual) return;
+          visual.targetX = player.x;
+          visual.targetY = player.y;
+          visual.label.setText(`${player.username} (Lv.${player.level})`);
+
+          if (sessionId === this.localSessionId) {
+            this.updateHud(player.username, player.level, player.xp);
+
+            // Latest authoritative reference point, used by
+            // applyServerCorrection() for gentle continuous drift
+            // correction. NOT applied directly to the container - the
+            // container's position is driven every frame by predictedX/Y
+            // in stepPrediction(), so a stale/late patch here can never
+            // cause a visible jump on its own.
+            this.serverX = player.x;
+            this.serverY = player.y;
+
+            // Track our own confirmed target and refresh the frame. Reading
+            // this off the Schema (rather than a local click-time guess)
+            // keeps the target frame authoritative - if the server rejected
+            // an invalid click/TAB request, this simply won't change.
+            this.currentTargetId = player.targetId;
+            this.currentTargetType = (player.targetType as TargetType) || "";
+            this.refreshTargetFrame();
+          }
+        });
+      });
+
+      room.state.players.onRemove((_player: any, sessionId: string) => {
         const visual = this.playerVisuals.get(sessionId);
-        if (!visual) return;
-        visual.targetX = player.x;
-        visual.targetY = player.y;
-        visual.label.setText(`${player.username} (Lv.${player.level})`);
-
-        if (sessionId === this.localSessionId) {
-          this.updateHud(player.username, player.level, player.xp);
-
-          // Latest authoritative reference point, used by
-          // applyServerCorrection() for gentle continuous drift
-          // correction. NOT applied directly to the container - the
-          // container's position is driven every frame by predictedX/Y
-          // in stepPrediction(), so a stale/late patch here can never
-          // cause a visible jump on its own.
-          this.serverX = player.x;
-          this.serverY = player.y;
-
-          // Track our own confirmed target and refresh the frame. Reading
-          // this off the Schema (rather than a local click-time guess)
-          // keeps the target frame authoritative - if the server rejected
-          // an invalid click/TAB request, this simply won't change.
-          this.currentTargetId = player.targetId;
-          this.currentTargetType = (player.targetType as TargetType) || "";
-          this.refreshTargetFrame();
+        if (visual) {
+          visual.container.destroy();
+          this.playerVisuals.delete(sessionId);
         }
       });
-    });
 
-    room.state.players.onRemove((_player: any, sessionId: string) => {
-      const visual = this.playerVisuals.get(sessionId);
-      if (visual) {
-        visual.container.destroy();
-        this.playerVisuals.delete(sessionId);
-      }
-    });
+      room.state.npcs.onAdd((npc: any, npcId: string) => {
+        this.addNpcVisual(npcId, npc);
 
-    room.state.npcs.onAdd((npc: any, npcId: string) => {
-      this.addNpcVisual(npcId, npc);
+        npc.onChange(() => {
+          const visual = this.npcVisuals.get(npcId);
+          if (!visual) return;
+          visual.targetX = npc.x;
+          visual.targetY = npc.y;
+          visual.label.setText(`${npc.name} (Lv.${npc.level})`);
 
-      npc.onChange(() => {
+          // If this NPC is our current target, its hp/level may have just
+          // changed (future combat) - refresh immediately rather than
+          // waiting for the next frame's poll.
+          if (this.currentTargetType === "npc" && this.currentTargetId === npcId) {
+            this.refreshTargetFrame();
+          }
+        });
+      });
+
+      room.state.npcs.onRemove((_npc: any, npcId: string) => {
         const visual = this.npcVisuals.get(npcId);
-        if (!visual) return;
-        visual.targetX = npc.x;
-        visual.targetY = npc.y;
-        visual.label.setText(`${npc.name} (Lv.${npc.level})`);
-
-        // If this NPC is our current target, its hp/level may have just
-        // changed (future combat) - refresh immediately rather than
-        // waiting for the next frame's poll.
-        if (this.currentTargetType === "npc" && this.currentTargetId === npcId) {
-          this.refreshTargetFrame();
+        if (visual) {
+          visual.container.destroy();
+          this.npcVisuals.delete(npcId);
         }
+        // Don't clear currentTarget* here - the server already clears a
+        // player's target when the targeted entity goes away (players, on
+        // leave). NPCs don't currently despawn, but if they do later, the
+        // next refreshTargetFrame() call will safely no-op on a missing id.
       });
-    });
 
-    room.state.npcs.onRemove((_npc: any, npcId: string) => {
-      const visual = this.npcVisuals.get(npcId);
-      if (visual) {
-        visual.container.destroy();
-        this.npcVisuals.delete(npcId);
-      }
-      // Don't clear currentTarget* here - the server already clears a
-      // player's target when the targeted entity goes away (players, on
-      // leave). NPCs don't currently despawn, but if they do later, the
-      // next refreshTargetFrame() call will safely no-op on a missing id.
-    });
+      room.onMessage("level-up", (msg: { username: string; level: number }) => {
+        this.showToast(`${msg.username} reached level ${msg.level}!`);
+      });
 
-    room.onMessage("level-up", (msg: { username: string; level: number }) => {
-      this.showToast(`${msg.username} reached level ${msg.level}!`);
-    });
+      room.onMessage("chat-message", (msg: { username: string; text: string; timestamp: number }) => {
+        this.chatUI.addMessage(msg.username, msg.text, msg.timestamp);
+      });
 
-    room.onMessage("chat-message", (msg: { username: string; text: string; timestamp: number }) => {
-      this.chatUI.addMessage(msg.username, msg.text, msg.timestamp);
-    });
+      room.onMessage(
+        "npc-contact",
+        (msg: { sessionId: string; npcId: string; npcName: string; isHostile: boolean }) => {
+          if (msg.sessionId !== this.localSessionId) return; // only react to our own contact
+          const prefix = msg.isHostile ? "⚔️ " : "";
+          this.showToast(`${prefix}Bumped into ${msg.npcName}!`, msg.isHostile ? "211,47,47" : "255,179,0");
+        }
+      );
 
-    room.onMessage(
-      "npc-contact",
-      (msg: { sessionId: string; npcId: string; npcName: string; isHostile: boolean }) => {
-        if (msg.sessionId !== this.localSessionId) return; // only react to our own contact
-        const prefix = msg.isHostile ? "⚔️ " : "";
-        this.showToast(`${prefix}Bumped into ${msg.npcName}!`, msg.isHostile ? "211,47,47" : "255,179,0");
-      }
-    );
+      // Client-side prediction reconciliation: the server echoes back the
+      // seq we tagged an outbound "move" message with, plus our confirmed
+      // position as of processing that input change. See reconcileFromAck()
+      // for the replay logic this drives.
+      room.onMessage("move-ack", (msg: { seq: number; x: number; y: number }) => {
+        this.reconcileFromAck(msg);
+      });
 
-    // Client-side prediction reconciliation: the server echoes back the
-    // seq we tagged an outbound "move" message with, plus our confirmed
-    // position as of processing that input change. See reconcileFromAck()
-    // for the replay logic this drives.
-    room.onMessage("move-ack", (msg: { seq: number; x: number; y: number }) => {
-      this.reconcileFromAck(msg);
-    });
+      // Everything above wired up without throwing - safe to reveal the
+      // game now.
+      this.loginScreen.hide();
+    } catch (err) {
+      console.error("[login] failed to connect:", err);
+      this.loginScreen.show("Couldn't connect to the server. Please try again.");
+    }
+  }
+
+  // Fires on room.onLeave - see connectToServer. Tears down all
+  // session-scoped visuals/state and sends the player back to the login
+  // screen. The `isConnected` guard prevents double-handling in case
+  // onLeave somehow fires more than once for the same room.
+  private handleDisconnect(code: number) {
+    if (!this.isConnected) return;
+    this.isConnected = false;
+    console.log(`[disconnect] left room (code ${code})`);
+
+    this.resetGameState();
+    this.loginScreen.show("Disconnected from the server.");
+  }
+
+  // Tears down everything tied to the just-ended session so a fresh login
+  // starts clean. Necessary because Phaser reuses this same GameScene
+  // instance across login attempts rather than recreating it - anything
+  // not reset here would leak into the next session (duplicate visuals,
+  // stale target, prediction drift from the old position, etc).
+  private resetGameState() {
+    this.playerVisuals.forEach((visual) => visual.container.destroy());
+    this.playerVisuals.clear();
+
+    this.npcVisuals.forEach((visual) => visual.container.destroy());
+    this.npcVisuals.clear();
+
+    this.localSessionId = "";
+    this.currentTargetId = "";
+    this.currentTargetType = "";
+    this.targetFrame.clear();
+
+    this.lastInput = { up: false, down: false, left: false, right: false };
+    this.predictedX = 0;
+    this.predictedY = 0;
+    this.serverX = 0;
+    this.serverY = 0;
+    this.inputSeq = 0;
+    this.inputHistory = [];
+
+    // Clear the stale username/level so it doesn't linger under the login
+    // overlay showing the previous session's info.
+    this.updateHud("Connecting...", 1, 0);
   }
 
   private addPlayerVisual(sessionId: string, player: any) {
@@ -351,8 +434,11 @@ export class GameScene extends Phaser.Scene {
   // Sends a target request to the server. Purely a request - the target
   // frame only updates once the server echoes back the confirmed
   // targetId/targetType on our own player (see the onChange handler
-  // above), keeping this fully server-authoritative.
+  // above), keeping this fully server-authoritative. Guarded on
+  // isConnected so a stray click/TAB/Escape after a disconnect (before the
+  // scene's visuals are all torn down) can't try to send on a closed room.
   private setTarget(id: string, type: TargetType) {
+    if (!this.isConnected) return;
     this.network.sendSetTarget(id, type);
   }
 
@@ -360,6 +446,7 @@ export class GameScene extends Phaser.Scene {
   // Same server round-trip as setTarget - null/null tells the server to
   // reset targetId/targetType to "" (see OverworldRoom.setPlayerTarget).
   private clearTarget() {
+    if (!this.isConnected) return;
     this.network.sendSetTarget(null, null);
   }
 
@@ -368,6 +455,7 @@ export class GameScene extends Phaser.Scene {
   // the next one after whatever we're currently targeting - wrapping
   // around at the end of the list.
   private cycleTarget() {
+    if (!this.isConnected) return;
     const room = this.network.room;
     const localPos = this.getLocalPlayerPosition();
     if (!room || !localPos) return;
@@ -436,6 +524,12 @@ export class GameScene extends Phaser.Scene {
   }
 
   update(_time: number, delta: number) {
+    // While the login screen is up (initial load, or after a disconnect),
+    // there's no room to simulate against - skip the whole game loop
+    // rather than letting handleInput/stepPrediction/etc. run against
+    // torn-down state.
+    if (!this.isConnected) return;
+
     this.handleInput();
     this.stepPrediction(delta);
     this.interpolateVisuals();
@@ -589,7 +683,7 @@ private reconcileFromAck(ack: { seq: number; x: number; y: number }) {
     // Remote players still interpolate toward the last synced position -
     // unchanged. The local player is deliberately skipped here: its
     // container position is driven directly by predictedX/Y in
-    // stepPrediction() every frame, which is what makes its movement feel
+    // stepPrediction(), which is what makes its movement feel
     // instant instead of lerped.
     this.playerVisuals.forEach((visual, sessionId) => {
       if (sessionId === this.localSessionId) return;

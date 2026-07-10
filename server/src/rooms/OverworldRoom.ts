@@ -33,10 +33,31 @@ function xpForNextLevel(level: number): number {
  */
 export class OverworldRoom extends Room<OverworldState> {
   maxClients = 100;
+
   private chatRateLimiter = new ChatRateLimiter();
   private npcContactCooldown = new Map<string, number>();
 
   onCreate() {
+    // VibeRealm has exactly one persistent shared overworld, not disposable
+    // per-session rooms - NPCs, spawner timers, etc. are meant to live for
+    // as long as the server process runs, independent of whether anyone's
+    // currently connected (see SPEC.md - "self-hosted persistent world").
+    // Colyseus's default (`autoDispose = true`) tears the room and all its
+    // state down shortly after the last client leaves, so the *next*
+    // joinOrCreate("overworld", ...) would silently create a brand-new room
+    // with empty state - which is why NPCs were vanishing across a
+    // disconnect/reconnect even though the server itself never restarted.
+    // Setting this false keeps the room (and its simulation/spawn
+    // intervals) alive with zero clients connected.
+    //
+    // NOTE: `autoDispose` is a getter/setter (accessor) on the base Room
+    // class in @colyseus/core, not a plain field - declaring
+    // `autoDispose = false` as a class property conflicts with that
+    // accessor (TS2610). Assigning it here via `this.autoDispose = ...`
+    // goes through the inherited setter instead, which is the correct way
+    // to override it.
+    this.autoDispose = false;
+
     this.setState(new OverworldState());
 
     // Fixed-rate authoritative movement loop. Clients only ever send
@@ -48,6 +69,11 @@ export class OverworldRoom extends Room<OverworldState> {
 
     // Testing spawner: one hostile mob every 10s, up to a population cap.
     // Replace with a real spawn-table/zone system once combat exists.
+    // Now that the room persists with zero players (autoDispose = false
+    // above), this keeps ticking even while the world is empty - which is
+    // the intended behavior (a living world, not one paused between
+    // sessions), and MAX_HOSTILE_MOBS already caps how far it can run
+    // ahead in the meantime.
     this.clock.setInterval(() => this.spawnRandomHostileMob(), NPC_SPAWN_INTERVAL_MS);
 
     this.onMessage(
