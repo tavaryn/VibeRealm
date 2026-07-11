@@ -6,6 +6,11 @@ import { isWalkable, TILE_SIZE, MAP_WIDTH, MAP_HEIGHT } from "../map/mapData";
 import { loadPlayer, savePlayer } from "../persistence/playerStore";
 import { sanitizeMessage, ChatRateLimiter } from "../chat/chatModeration";
 import { createHostileMob, findRandomWalkableSpawn } from "../npc/npcFactory";
+import { xpForNextLevel } from "../util/leveling";
+import { commandRegistry } from "../admin/commandRegistry";
+import { isAdmin } from "../admin/adminAuth";
+import { isBanned } from "../admin/banList";
+import { setActiveRoom, requestShutdown } from "../admin/adminRuntime";
 
 const MOVE_SPEED = 120; // pixels per second
 const SIMULATION_TICK_MS = 1000 / 20; // 20 Hz server movement tick
@@ -18,18 +23,12 @@ const NPC_CONTACT_COOLDOWN_MS = 1000; // avoid spamming contact events every tic
 
 type TargetType = "player" | "npc";
 
-function xpForNextLevel(level: number): number {
-  return level * 100;
-}
-
 /**
  * Single shared overworld room. Server-authoritative movement + collision,
- * a slow passive XP timer, server-validated targeting, and (new) a small
- * unicast ack on movement input to support client-side prediction -
- * see the "move" handler below and client GameScene.reconcileFromAck.
- * Kept intentionally simple for the MVP; combat can hook into the
- * validated target the same way `set-target` does today (see
- * `setPlayerTarget`).
+ * a slow passive XP timer, server-validated targeting, client-side
+ * prediction support (move-ack), and (new) an admin command system - both
+ * the server console and in-game "/"-prefixed chat route into the same
+ * shared CommandRegistry (see server/src/admin/).
  */
 export class OverworldRoom extends Room<OverworldState> {
   maxClients = 100;
@@ -39,41 +38,13 @@ export class OverworldRoom extends Room<OverworldState> {
 
   onCreate() {
     // VibeRealm has exactly one persistent shared overworld, not disposable
-    // per-session rooms - NPCs, spawner timers, etc. are meant to live for
-    // as long as the server process runs, independent of whether anyone's
-    // currently connected (see SPEC.md - "self-hosted persistent world").
-    // Colyseus's default (`autoDispose = true`) tears the room and all its
-    // state down shortly after the last client leaves, so the *next*
-    // joinOrCreate("overworld", ...) would silently create a brand-new room
-    // with empty state - which is why NPCs were vanishing across a
-    // disconnect/reconnect even though the server itself never restarted.
-    // Setting this false keeps the room (and its simulation/spawn
-    // intervals) alive with zero clients connected.
-    //
-    // NOTE: `autoDispose` is a getter/setter (accessor) on the base Room
-    // class in @colyseus/core, not a plain field - declaring
-    // `autoDispose = false` as a class property conflicts with that
-    // accessor (TS2610). Assigning it here via `this.autoDispose = ...`
-    // goes through the inherited setter instead, which is the correct way
-    // to override it.
+    // per-session rooms - see SPEC.md Section 3b for the full rationale.
     this.autoDispose = false;
 
     this.setState(new OverworldState());
 
-    // Fixed-rate authoritative movement loop. Clients only ever send
-    // *input state*, never positions - the server decides where players go.
     this.setSimulationInterval((deltaTime) => this.update(deltaTime), SIMULATION_TICK_MS);
-
-    // Decoupled slow tick for passive progression.
     this.clock.setInterval(() => this.grantPassiveXp(), XP_TICK_MS);
-
-    // Testing spawner: one hostile mob every 10s, up to a population cap.
-    // Replace with a real spawn-table/zone system once combat exists.
-    // Now that the room persists with zero players (autoDispose = false
-    // above), this keeps ticking even while the world is empty - which is
-    // the intended behavior (a living world, not one paused between
-    // sessions), and MAX_HOSTILE_MOBS already caps how far it can run
-    // ahead in the meantime.
     this.clock.setInterval(() => this.spawnRandomHostileMob(), NPC_SPAWN_INTERVAL_MS);
 
     this.onMessage(
@@ -89,26 +60,12 @@ export class OverworldRoom extends Room<OverworldState> {
         player.inputLeft = !!input.left;
         player.inputRight = !!input.right;
 
-        // Client-side prediction support: echo back the seq the client
-        // tagged this input change with, plus this player's authoritative
-        // position *right now* (i.e. before the new input flags above
-        // take effect on the next simulation tick). The client uses this
-        // to discard/replay its local prediction history and correct any
-        // drift without a visible jump - see GameScene.reconcileFromAck().
-        // Unicast (client.send), not broadcast - no other client needs
-        // this, and it costs nothing beyond the client's own round-trip.
         if (typeof input.seq === "number") {
           client.send("move-ack", { seq: input.seq, x: player.x, y: player.y });
         }
       }
     );
 
-    // Targeting: client requests a target (from a click or TAB-cycle);
-    // server validates the target actually exists before committing it to
-    // the player's synced state. Passing a falsy targetId/targetType
-    // clears the current target. This is the single choke point future
-    // combat code (e.g. an "attack" message) can reuse to re-validate a
-    // player's current target before applying damage.
     this.onMessage(
       "set-target",
       (client, payload: { targetId?: string | null; targetType?: TargetType | null }) => {
@@ -118,18 +75,39 @@ export class OverworldRoom extends Room<OverworldState> {
       }
     );
 
-    // Global chat: sent as a broadcast message (not Schema state), since chat
-    // history doesn't need to be synced/diffed like player state does - it's
-    // fire-and-forget for whoever is currently in the room. No persistence
-    // for MVP per SPEC.md. Swapping this for room.send-based proximity chat
-    // later just means filtering the broadcast recipient list here.
-    this.onMessage("chat", (client, payload: { text?: string }) => {
+    // Global chat, with a new admin-command interception step at the top.
+    this.onMessage("chat", async (client, payload: { text?: string }) => {
       const player = this.state.players.get(client.sessionId);
       if (!player) return;
 
+      const raw = (payload?.text ?? "").trim();
+
+      // Anything starting with "/" is routed to the shared command
+      // registry instead of being broadcast as chat - regardless of
+      // whether the sender turns out to be an admin, since the registry
+      // itself checks and logs that. This is the exact same execute()
+      // path the server console uses (see admin/consoleInput.ts); only
+      // the actor type and reply mechanism differ - which is the whole
+      // point of the handler/registry pattern (a future web admin panel
+      // would be a third caller of the same function).
+      if (raw.startsWith("/")) {
+        await commandRegistry.execute(
+          raw,
+          {
+            type: "chat",
+            username: player.username,
+            sessionId: client.sessionId,
+            isAdmin: isAdmin(player.username),
+          },
+          (msg) => client.send("command-reply", { text: msg }),
+          { room: this, requestShutdown }
+        );
+        return;
+      }
+
       if (!this.chatRateLimiter.canSend(client.sessionId)) return;
 
-      const text = sanitizeMessage(payload?.text);
+      const text = sanitizeMessage(raw);
       if (!text) return;
 
       this.broadcast("chat-message", {
@@ -138,6 +116,23 @@ export class OverworldRoom extends Room<OverworldState> {
         timestamp: Date.now(),
       });
     });
+
+    // Registers this room as "the" active room for admin commands (used
+    // by the server console, which isn't inside any room itself - see
+    // admin/adminRuntime.ts). Cleared in onDispose() below.
+    setActiveRoom(this);
+    console.log("[admin] OverworldRoom registered as the active room for admin commands.");
+  }
+
+  // Runs before onJoin - rejecting here means a banned username never
+  // gets a Player created for it at all, rather than being kicked a
+  // moment after joining.
+  async onAuth(_client: Client, options: { username?: string }) {
+    const username = (options?.username || "").trim();
+    if (username && isBanned(username)) {
+      throw new Error("You are banned from this server.");
+    }
+    return true;
   }
 
   onJoin(client: Client, options: { username?: string }) {
@@ -149,14 +144,9 @@ export class OverworldRoom extends Room<OverworldState> {
     player.username = username;
     player.level = saved.level;
     player.xp = saved.xp;
-    // Default stat block - just "power" for now. Combat/classes work later
-    // reads/writes this map without requiring another schema change.
     player.stats.set("power", saved.stats?.power ?? 10);
-    // hp/maxHp aren't persisted yet (no combat to reduce them) - every
-    // join starts full health. Revisit once damage/death/respawn exist.
     player.maxHp = 100;
     player.hp = 100;
-    // Simple fixed spawn point near map center for the MVP.
     player.x = Math.floor(MAP_WIDTH / 2) * TILE_SIZE;
     player.y = Math.floor(MAP_HEIGHT / 2) * TILE_SIZE;
 
@@ -177,10 +167,6 @@ export class OverworldRoom extends Room<OverworldState> {
       this.chatRateLimiter.remove(client.sessionId);
       this.npcContactCooldown.delete(client.sessionId);
 
-      // Clear anyone who had the now-departed player targeted, so their
-      // HUD target frame doesn't keep showing a target that no longer
-      // exists. NPC targets never point at a player's sessionId, so no
-      // equivalent cleanup is needed there.
       this.state.players.forEach((otherPlayer) => {
         if (otherPlayer.targetType === "player" && otherPlayer.targetId === client.sessionId) {
           otherPlayer.targetId = "";
@@ -192,10 +178,32 @@ export class OverworldRoom extends Room<OverworldState> {
     }
   }
 
-  // Server-authoritative target validation. Silently ignores an invalid
-  // target (unknown id/type) rather than erroring, since a mismatch here
-  // just means a client's local candidate list was stale by a tick or two
-  // (e.g. it clicked an NPC that despawned a moment earlier).
+  onDispose() {
+    // Room is being destroyed (only expected on an actual server
+    // shutdown, since autoDispose=false keeps it alive otherwise) - clear
+    // the admin system's reference so console commands correctly report
+    // "no active room" instead of holding a stale one.
+    setActiveRoom(null);
+  }
+
+  // Public so the admin /givexp command (server/src/admin/commands.ts)
+  // can reuse the exact same level-up logic as passive XP, rather than
+  // duplicating it.
+  grantXp(player: Player, amount: number) {
+    player.xp += amount;
+    // while, not if - so one large admin grant can cross multiple level
+    // thresholds in a single call, same as enough passive ticks eventually would.
+    while (player.xp >= xpForNextLevel(player.level)) {
+      player.xp -= xpForNextLevel(player.level);
+      player.level += 1;
+      this.broadcast("level-up", {
+        sessionId: player.id,
+        username: player.username,
+        level: player.level,
+      });
+    }
+  }
+
   private setPlayerTarget(
     player: Player,
     targetId: string | null,
@@ -233,7 +241,6 @@ export class OverworldRoom extends Room<OverworldState> {
 
       if (dx === 0 && dy === 0) return;
 
-      // Normalize so diagonal movement isn't faster than cardinal movement.
       const len = Math.sqrt(dx * dx + dy * dy);
       dx = (dx / len) * MOVE_SPEED * dt;
       dy = (dy / len) * MOVE_SPEED * dt;
@@ -242,8 +249,6 @@ export class OverworldRoom extends Room<OverworldState> {
     });
   }
 
-  // Axis-separated movement: resolving X and Y independently lets a player
-  // slide along a wall instead of stopping dead when moving diagonally into it.
   private tryMove(player: Player, dx: number, dy: number) {
     const nextX = player.x + dx;
     const blockingNpcX = this.findNpcNear(nextX, player.y);
@@ -262,8 +267,6 @@ export class OverworldRoom extends Room<OverworldState> {
     }
   }
 
-  // Checks a small collision box (not just the center point) against the
-  // tile grid so players can't clip a corner into a wall tile.
   private isPositionWalkable(x: number, y: number): boolean {
     const half = TILE_SIZE * 0.35;
     const corners: [number, number][] = [
@@ -277,9 +280,6 @@ export class OverworldRoom extends Room<OverworldState> {
     );
   }
 
-  // Treats NPCs as simple radius-based obstacles rather than tile-snapped
-  // walls, since NPCs will eventually move (patrol/chase AI) and won't
-  // always sit neatly on a tile boundary.
   private findNpcNear(x: number, y: number): Npc | undefined {
     let found: Npc | undefined;
     this.state.npcs.forEach((npc) => {
@@ -293,9 +293,6 @@ export class OverworldRoom extends Room<OverworldState> {
     return found;
   }
 
-  // No combat yet - just a rate-limited notification so the client can show
-  // a log message / bump feedback. This is the natural hook point for
-  // damage-on-touch or aggro once combat exists.
   private handleNpcContact(player: Player, npc: Npc) {
     const now = Date.now();
     const last = this.npcContactCooldown.get(player.id) ?? 0;
@@ -311,7 +308,7 @@ export class OverworldRoom extends Room<OverworldState> {
   }
 
   private spawnRandomHostileMob() {
-    if (this.state.npcs.size >= MAX_HOSTILE_MOBS) return; // simple population cap
+    if (this.state.npcs.size >= MAX_HOSTILE_MOBS) return;
 
     const spawnPoint = findRandomWalkableSpawn();
     if (!spawnPoint) return;
@@ -322,18 +319,6 @@ export class OverworldRoom extends Room<OverworldState> {
   }
 
   private grantPassiveXp() {
-    this.state.players.forEach((player) => {
-      player.xp += XP_PER_TICK;
-      const needed = xpForNextLevel(player.level);
-      if (player.xp >= needed) {
-        player.xp -= needed;
-        player.level += 1;
-        this.broadcast("level-up", {
-          sessionId: player.id,
-          username: player.username,
-          level: player.level,
-        });
-      }
-    });
+    this.state.players.forEach((player) => this.grantXp(player, XP_PER_TICK));
   }
 }

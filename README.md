@@ -16,7 +16,11 @@ cd server && npm install
 cd ../client && npm install
 ```
 
-**2. Build the client:**
+**2. (Optional) Make yourself an admin.** See "Admin commands" below -
+either set the `ADMIN_USERNAMES` env var or edit `server/data/admins.json`
+before starting the server.
+
+**3. Build the client:**
 ```bash
 cd client
 npm run build
@@ -29,17 +33,20 @@ Forgetting this step is the most common cause of "I made a change but
 nothing happened" - if a fix doesn't seem to apply, rebuild the client and
 hard-refresh your browser (Ctrl+Shift+R) before digging further.
 
-**3. Start the server** (from `server/`):
+**4. Start the server** (from `server/`):
 ```bash
 npm run dev
 ```
-You should see: `VibeRealm server listening on port 2567`
+You should see: `VibeRealm server listening on port 2567`, followed by
+`[admin] Server console ready. Type "/help" for a list of commands.` and a
+`viberealm>` prompt - the same terminal is now both your server log *and*
+an interactive admin console (see below).
 
-**4. Connect:** open `http://localhost:2567` in your browser. You'll land
+**5. Connect:** open `http://localhost:2567` in your browser. You'll land
 on a login screen - enter any username and click **Enter World** (or press
 Enter) to join.
 
-**5. Test multiplayer:** open the same URL in two different browser tabs
+**6. Test multiplayer:** open the same URL in two different browser tabs
 (or one normal + one incognito window) and log in with a different
 username in each. Move each with WASD or arrow keys - movement should feel
 instant on the tab you're controlling (client-side prediction), while the
@@ -54,22 +61,78 @@ reloaded next time that username joins. The shared overworld itself
 server process keeps running, independent of whether anyone is currently
 connected - see "Persistent world" below.
 
+## Admin commands
+
+VibeRealm has a server-authoritative admin command system, usable two
+ways - both run through the exact same validated/logged code path:
+
+- **Server console:** the terminal running `npm run dev`/`npm start`
+  doubles as an interactive prompt. Type a command (`/help`, `who`, etc. -
+  the leading `/` is optional here) and press Enter. The console is
+  always treated as admin.
+- **In-game chat:** any admin can type a `/`-prefixed message in the chat
+  box (same input used for normal chat - Enter to open it) to run a
+  command. Non-admins attempting a privileged command get a polite denial
+  instead of the command running.
+
+**Becoming an admin:** add your username (case-insensitive) to
+`server/data/admins.json` -
+
+```json
+["YourUsername"]
+```
+
+- this file is auto-created (empty) on first run if it doesn't exist yet -
+or set an environment variable before starting the server:
+
+```bash
+ADMIN_USERNAMES=YourUsername,YourFriend npm run dev
+```
+
+**Built-in commands:**
+
+| Command | Description |
+|---|---|
+| `/help` | Lists all available commands. |
+| `/who` | Lists currently connected players. |
+| `/quit` | Broadcasts a shutdown warning, then gracefully stops the server process. |
+| `/ban <username> [reason]` | Bans a username (persisted) and disconnects them if online. |
+| `/unban <username>` | Removes a username from the ban list. |
+| `/kick <username> [reason]` | Disconnects an online player without banning them. |
+| `/kill <player or npc identifier>` | Removes an NPC outright, or zeroes a player's HP and disconnects them (no death/respawn system exists yet). Accepts a username/NPC name or the raw session/NPC id. |
+| `/givexp <username or sessionId> <amount>` | Grants XP to a player, applying the same level-up logic as passive XP. |
+
+**Known limitation:** command replies and the shutdown warning are sent to
+the browser but not yet shown anywhere in the game UI - check the browser
+dev console (F12) to see them for now. This is flagged as a near-term
+follow-up in SPEC.md.
+
+**Adding a new command:** open `server/src/admin/commands.ts` and add
+another `commandRegistry.register({...})` block - no other files need to
+change. See SPEC.md Section 3c for the full design.
+
+**Security note:** admin status is username-based only (no password
+layer) - fine for a friends-only self-hosted server, but don't rely on it
+if you ever expose VibeRealm more broadly without adding real
+authentication first.
+
 ## Login screen & disconnecting
 
 - On page load (or after being disconnected), you'll see a login card
   instead of the game. Enter a username and submit - the button shows
   "Connecting..." briefly, then the game appears once the server confirms
-  the join. A failed connection attempt (e.g. server not running) shows an
-  inline error and lets you retry without reloading the page.
+  the join. A failed connection attempt (e.g. server not running, or a
+  banned username) shows an inline error and lets you retry without
+  reloading the page.
 - If your connection to the server ever drops - the server process is
-  stopped/restarted, your network blips, or you're kicked - you'll be
-  returned automatically to the login screen with a
+  stopped/restarted, you're kicked/banned by an admin, your network
+  blips - you'll be returned automatically to the login screen with a
   "Disconnected from the server." message. Just log back in (same or
   different username) to rejoin; no page reload needed.
 - There's no automatic reconnect-with-retry yet, and no session-resume
   (picking back up mid-session at your old position) - a dropped
   connection always means logging in again fresh. That's a known,
-  intentional MVP limitation (see SPEC.md Roadmap #10).
+  intentional MVP limitation (see SPEC.md Roadmap).
 - Typing works normally in both the login username field and the chat
   box, including letters that overlap with the WASD movement keys (e.g.
   "Aaadam") - keystrokes in either field are kept from reaching the
@@ -85,8 +148,9 @@ as long as the server process is running. This means:
   (possibly joined by a few more that spawned while you were away),
   instead of the world resetting to empty.
 - The world only actually resets if you stop and restart the server
-  process itself (`Ctrl+C` then `npm run dev`/`npm start` again) - not on
-  every player disconnecting.
+  process itself (`Ctrl+C` then `npm run dev`/`npm start` again, or via
+  the `/quit` admin command followed by a manual restart) - not on every
+  player disconnecting.
 - Your own saved progress (level/xp/stats) is unaffected either way - it's
   saved to `server/data/players.json` on disconnect and reloaded on your
   next join, regardless of what the shared room's NPC population is doing.
@@ -113,7 +177,7 @@ Dev and production now share the same single-port model, so there's no
 extra build step beyond what's above.
 
 **1.** Make sure you've run `npm run build` in `client/` after your latest
-changes (step 2 above).
+changes (step 3 above).
 
 **2. Start the server** (from `server/`, either works):
 ```bash
@@ -132,18 +196,25 @@ installed on his end. He'll land on the same login screen you do.
 Rebuild the client (`npm run build` in `client/`) any time you change
 client code and want friends to see the update, then restart the server
 process afterward. (Restarting the server *will* reset the shared world -
-see "Persistent world" above - so give friends a heads-up before you do.)
+see "Persistent world" above - so give friends a heads-up before you do,
+or use `/quit` to warn everyone with a broadcast message first.)
 
 ## What's implemented
 
+- **Admin Command System:** server console + in-game (`/`-prefixed chat)
+  commands routed through a single shared registry - `/help`, `/who`,
+  `/quit`, `/ban`, `/unban`, `/kick`, `/kill`, `/givexp`. Admin status is
+  username-based (`server/data/admins.json` / `ADMIN_USERNAMES`); bans are
+  persisted (`server/data/bans.json`) and enforced before a join is ever
+  accepted. Designed for easy extension - see "Admin commands" above.
 - **Login screen** (HTML/CSS overlay) shown on load and again after any
   disconnect, replacing the old `window.prompt()`. Username entry only for
   MVP - a password field slot exists in the markup, hidden and unused, for
   future auth.
-- **Graceful disconnect handling:** a dropped connection tears down local
-  game state and returns the player to the login screen with a status
-  message, instead of leaving a frozen/broken scene.
-- **Persistent shared world:** the overworld room (and its NPCs) now stays
+- **Graceful disconnect handling:** a dropped connection (including a kick
+  or ban) tears down local game state and returns the player to the login
+  screen with a status message, instead of leaving a frozen/broken scene.
+- **Persistent shared world:** the overworld room (and its NPCs) stays
   alive for the lifetime of the server process, surviving every client
   disconnecting - it no longer silently resets to empty between sessions.
 - Shared 30x30 tile overworld with border walls + scattered obstacles.
@@ -158,20 +229,23 @@ see "Persistent world" above - so give friends a heads-up before you do.)
   technique only, not a trust change.
 - Colyseus Schema state sync (delta/patch, not full broadcasts).
 - Passive XP every ~25s, level-up threshold `level * 100`, broadcast toast.
+  Shared level-up logic now also powers the `/givexp` admin command.
 - Simple HTML HUD (username, level, XP bar) driven by schema `onChange`.
 - Basic interpolation so other players move smoothly between updates.
 - Global chat (sanitized, rate-limited), Enter to open/send, Escape or
-  click away to return to movement.
+  click away to return to movement. Messages starting with `/` are routed
+  to the admin command system instead of being broadcast.
 - Hostile NPCs: spawn every ~10s (capped population), synced via Schema,
   block player movement, and trigger a rate-limited "bumped into" toast.
   Static for now - `behavior` field on `Npc` is a placeholder for AI later.
   Not predicted client-side (accepted trade-off, see SPEC.md Section 3a).
+  Can be force-removed via `/kill`.
 - **Targeting System:** click a player or NPC, or press TAB to cycle
   nearest-first through visible entities. Clear the target with Escape or
   by clicking empty map space. Server validates every request before
   committing it. Target HUD (top-right) shows name, level, and an HP bar.
-- `Player` schema now also carries `hp`/`maxHp` - groundwork for combat,
-  not yet consumed by any damage logic.
+- `Player` schema also carries `hp`/`maxHp` - groundwork for combat, not
+  yet consumed by any damage logic (though `/kill` can zero it directly).
 - Single-port model for both dev and production.
 
 ## Suggested next follow-ups (ask for these one at a time)
@@ -179,21 +253,29 @@ see "Persistent world" above - so give friends a heads-up before you do.)
 1. **Combat MVP** - simple melee attack message + server-validated hit
    detection against the player's current target (reusing the Targeting
    System's validation pattern) + XP/loot on kill, per SPEC.md roadmap.
-2. **NPC AI** - patrol/aggro/chase behavior using the `behavior` placeholder
+2. **Wire admin `command-reply`/`server-shutdown` into the UI** - currently
+   only visible in the browser dev console; a small chat-log or toast
+   integration would make in-game admin usage practical without devtools.
+3. **NPC AI** - patrol/aggro/chase behavior using the `behavior` placeholder
    field and the unsynced `targetId`/`targetType` fields already on `Npc`.
    Will also mean deciding whether to extend client-side prediction to
    cover NPC collision once NPCs actually move.
-3. **Better collision/tilemap authoring** - load a Tiled JSON map instead of
+4. **Better collision/tilemap authoring** - load a Tiled JSON map instead of
    the hardcoded array, for both server collision and client rendering
    (and client-side prediction too).
-4. **Basic interest management** - only send nearby players'/NPCs' state
+5. **Basic interest management** - only send nearby players'/NPCs' state
    deltas once entity counts grow, using a simple grid bucket per room.
-5. **Persistence upgrade** - swap `playerStore.ts`'s JSON file for
+6. **Persistence upgrade** - swap `playerStore.ts`'s JSON file for
    Postgres, keeping the same `loadPlayer`/`savePlayer` function
    signatures. Also decide whether `hp`/`maxHp` get persisted once combat
-   and death/respawn exist.
-6. **Reconnection / session-resume** - automatic reconnect-with-backoff
+   and death/respawn exist, and whether `admins.json`/`bans.json` should
+   move to the same store.
+7. **Reconnection / session-resume** - automatic reconnect-with-backoff
    after a disconnect, and resuming a dropped session (same identity,
    position, etc.) instead of always requiring a fresh manual login.
-7. **Configurable external port** - if you ever need the client to connect
-   to a different external port than the server's internal one.
+8. **Web admin panel** - an authenticated HTTP layer calling the same
+   `commandRegistry.execute()` already used by console and chat.
+9. **More admin commands** - `/spawn`, `/teleport`, `/setlevel`, `/mute`,
+   `/broadcast`, following the same single-registration pattern.
+10. **Configurable external port** - if you ever need the client to connect
+    to a different external port than the server's internal one.
