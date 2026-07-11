@@ -77,9 +77,15 @@ commandRegistry.register({
     addBan(username, reason, describeActor(ctx.actor));
 
     if (ctx.room) {
+      // NOTE: target.sessionId (the live-connection / MapSchema key), NOT
+      // target.player.id (the UUID v7 identity field) - since the UUID
+      // migration, `state.players` is still keyed by Colyseus's
+      // client.sessionId, but Player.id is now an independently
+      // generated value. See entityLookup.ts's PlayerLookupResult doc
+      // comment for the full reasoning.
       const target = findPlayerByIdentifier(ctx.room, username);
       if (target) {
-        const client = ctx.room.clients.find((c) => c.sessionId === target.id);
+        const client = ctx.room.clients.find((c) => c.sessionId === target.sessionId);
         client?.leave(4003, `Banned: ${reason}`);
       }
     }
@@ -122,13 +128,14 @@ commandRegistry.register({
       ctx.reply(`No connected player found matching "${username}".`);
       return;
     }
-    const client = ctx.room!.clients.find((c) => c.sessionId === target.id);
+    // sessionId, not target.player.id - see /ban's comment above.
+    const client = ctx.room!.clients.find((c) => c.sessionId === target.sessionId);
     if (!client) {
-      ctx.reply(`Found "${target.username}" in state but no matching connection - skipping.`);
+      ctx.reply(`Found "${target.player.username}" in state but no matching connection - skipping.`);
       return;
     }
     client.leave(4001, reason);
-    ctx.reply(`Kicked "${target.username}". Reason: ${reason}`);
+    ctx.reply(`Kicked "${target.player.username}". Reason: ${reason}`);
   },
 });
 
@@ -146,15 +153,16 @@ commandRegistry.register({
       return;
     }
 
-    const player = findPlayerByIdentifier(ctx.room!, identifier);
-    if (player) {
+    const target = findPlayerByIdentifier(ctx.room!, identifier);
+    if (target) {
       // No death/respawn system exists yet (SPEC.md Roadmap #1) - the
       // honest MVP behavior is "zero their hp and disconnect them" rather
       // than faking a death/respawn flow that isn't built yet.
-      player.hp = 0;
-      const client = ctx.room!.clients.find((c) => c.sessionId === player.id);
+      target.player.hp = 0;
+      // sessionId, not target.player.id - see /ban's comment above.
+      const client = ctx.room!.clients.find((c) => c.sessionId === target.sessionId);
       client?.leave(4002, "Killed by admin");
-      ctx.reply(`Killed player "${player.username}".`);
+      ctx.reply(`Killed player "${target.player.username}".`);
       return;
     }
 
@@ -183,13 +191,15 @@ commandRegistry.register({
       return;
     }
 
-    const player = findPlayerByIdentifier(ctx.room!, identifier);
-    if (!player) {
+    const target = findPlayerByIdentifier(ctx.room!, identifier);
+    if (!target) {
       ctx.reply(`No connected player found matching "${identifier}".`);
       return;
     }
 
-    ctx.room!.grantXp(player, amount);
-    ctx.reply(`Granted ${amount} XP to "${player.username}" (now level ${player.level}, ${player.xp} xp).`);
+    ctx.room!.grantXp(target.player, amount);
+    ctx.reply(
+      `Granted ${amount} XP to "${target.player.username}" (now level ${target.player.level}, ${target.player.xp} xp).`
+    );
   },
 });

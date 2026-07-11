@@ -11,6 +11,7 @@ import { commandRegistry } from "../admin/commandRegistry";
 import { isAdmin } from "../admin/adminAuth";
 import { isBanned } from "../admin/banList";
 import { setActiveRoom, requestShutdown } from "../admin/adminRuntime";
+import { generateId } from "../utils/generateId";
 
 const MOVE_SPEED = 120; // pixels per second
 const SIMULATION_TICK_MS = 1000 / 20; // 20 Hz server movement tick
@@ -26,7 +27,7 @@ type TargetType = "player" | "npc";
 /**
  * Single shared overworld room. Server-authoritative movement + collision,
  * a slow passive XP timer, server-validated targeting, client-side
- * prediction support (move-ack), and (new) an admin command system - both
+ * prediction support (move-ack), and an admin command system - both
  * the server console and in-game "/"-prefixed chat route into the same
  * shared CommandRegistry (see server/src/admin/).
  */
@@ -34,6 +35,12 @@ export class OverworldRoom extends Room<OverworldState> {
   maxClients = 100;
 
   private chatRateLimiter = new ChatRateLimiter();
+  // Keyed by Colyseus client.sessionId (NOT player.id) - must match the
+  // key used in onLeave()'s cleanup below, or entries leak forever after
+  // a player disconnects. See handleNpcContact()/tryMove() for why this
+  // has to be threaded through explicitly rather than read off `player.id`
+  // (which, since the UUID v7 migration, is no longer the same string as
+  // the player's session id).
   private npcContactCooldown = new Map<string, number>();
 
   onCreate() {
@@ -75,7 +82,7 @@ export class OverworldRoom extends Room<OverworldState> {
       }
     );
 
-    // Global chat, with a new admin-command interception step at the top.
+    // Global chat, with an admin-command interception step at the top.
     this.onMessage("chat", async (client, payload: { text?: string }) => {
       const player = this.state.players.get(client.sessionId);
       if (!player) return;
@@ -140,7 +147,13 @@ export class OverworldRoom extends Room<OverworldState> {
     const saved = loadPlayer(username);
 
     const player = new Player();
-    player.id = client.sessionId;
+    // player.id is an independently-generated UUID v7 - deliberately NOT
+    // the same value as client.sessionId. `state.players` is still keyed
+    // by client.sessionId (Colyseus needs that for client.leave()/
+    // matching ctx.room.clients entries), and targeting/collision/NPC
+    // contact tracking continue to use that map key, not this field. See
+    // server/src/utils/generateId.ts and admin/entityLookup.ts.
+    player.id = generateId("player");
     player.username = username;
     player.level = saved.level;
     player.xp = saved.xp;
@@ -186,10 +199,16 @@ export class OverworldRoom extends Room<OverworldState> {
     setActiveRoom(null);
   }
 
-  // Public so the admin /givexp command (server/src/admin/commands.ts)
+// Public so the admin /givexp command (server/src/admin/commands.ts)
   // can reuse the exact same level-up logic as passive XP, rather than
-  // duplicating it.
-  grantXp(player: Player, amount: number) {
+  // duplicating it. Takes `sessionId` explicitly (same fix as
+  // handleNpcContact() above) so the "level-up" broadcast's `sessionId`
+  // field is actually the player's Colyseus session id, not the UUID v7
+  // `player.id` - harmless today since GameScene's level-up handler only
+  // reads username/level, but wrong is wrong, and a future feature that
+  // *does* key off it (e.g. a "congrats!" toast only the leveling player
+  // sees) would have silently misfired otherwise.
+  grantXp(player: Player, amount: number, sessionId: string) {
     player.xp += amount;
     // while, not if - so one large admin grant can cross multiple level
     // thresholds in a single call, same as enough passive ticks eventually would.
@@ -197,7 +216,7 @@ export class OverworldRoom extends Room<OverworldState> {
       player.xp -= xpForNextLevel(player.level);
       player.level += 1;
       this.broadcast("level-up", {
-        sessionId: player.id,
+        sessionId,
         username: player.username,
         level: player.level,
       });
@@ -231,7 +250,10 @@ export class OverworldRoom extends Room<OverworldState> {
   private update(deltaTime: number) {
     const dt = deltaTime / 1000;
 
-    this.state.players.forEach((player) => {
+    // NOTE: now reads the sessionId key too (forEach's second callback
+    // arg) - needed so tryMove() can thread it down to handleNpcContact()
+    // for the npc-contact broadcast/cooldown fix. Nothing else here changed.
+    this.state.players.forEach((player, sessionId) => {
       let dx = 0;
       let dy = 0;
       if (player.inputUp) dy -= 1;
@@ -245,17 +267,17 @@ export class OverworldRoom extends Room<OverworldState> {
       dx = (dx / len) * MOVE_SPEED * dt;
       dy = (dy / len) * MOVE_SPEED * dt;
 
-      this.tryMove(player, dx, dy);
+      this.tryMove(player, dx, dy, sessionId);
     });
   }
 
-  private tryMove(player: Player, dx: number, dy: number) {
+  private tryMove(player: Player, dx: number, dy: number, sessionId: string) {
     const nextX = player.x + dx;
     const blockingNpcX = this.findNpcNear(nextX, player.y);
     if (this.isPositionWalkable(nextX, player.y) && !blockingNpcX) {
       player.x = nextX;
     } else if (blockingNpcX) {
-      this.handleNpcContact(player, blockingNpcX);
+      this.handleNpcContact(player, blockingNpcX, sessionId);
     }
 
     const nextY = player.y + dy;
@@ -263,7 +285,7 @@ export class OverworldRoom extends Room<OverworldState> {
     if (this.isPositionWalkable(player.x, nextY) && !blockingNpcY) {
       player.y = nextY;
     } else if (blockingNpcY) {
-      this.handleNpcContact(player, blockingNpcY);
+      this.handleNpcContact(player, blockingNpcY, sessionId);
     }
   }
 
@@ -293,14 +315,22 @@ export class OverworldRoom extends Room<OverworldState> {
     return found;
   }
 
-  private handleNpcContact(player: Player, npc: Npc) {
+  // FIXED: now takes `sessionId` explicitly instead of reading `player.id`.
+  // Since the UUID v7 migration, `player.id` is no longer the same string
+  // as the player's Colyseus session id, so both the cooldown map key and
+  // the "npc-contact" broadcast's `sessionId` field were silently wrong -
+  // the cooldown map leaked an entry per disconnect (never matched
+  // onLeave's `delete(client.sessionId)`), and the client's
+  // `msg.sessionId !== this.localSessionId` check in GameScene always
+  // failed, so nobody ever saw the "bumped into" toast anymore.
+  private handleNpcContact(player: Player, npc: Npc, sessionId: string) {
     const now = Date.now();
-    const last = this.npcContactCooldown.get(player.id) ?? 0;
+    const last = this.npcContactCooldown.get(sessionId) ?? 0;
     if (now - last < NPC_CONTACT_COOLDOWN_MS) return;
-    this.npcContactCooldown.set(player.id, now);
+    this.npcContactCooldown.set(sessionId, now);
 
     this.broadcast("npc-contact", {
-      sessionId: player.id,
+      sessionId,
       npcId: npc.id,
       npcName: npc.name,
       isHostile: npc.isHostile,
@@ -318,7 +348,7 @@ export class OverworldRoom extends Room<OverworldState> {
     console.log(`[npc] spawned ${npc.name} (${npc.id}) at (${spawnPoint.x}, ${spawnPoint.y})`);
   }
 
-  private grantPassiveXp() {
-    this.state.players.forEach((player) => this.grantXp(player, XP_PER_TICK));
+private grantPassiveXp() {
+    this.state.players.forEach((player, sessionId) => this.grantXp(player, XP_PER_TICK, sessionId));
   }
 }
