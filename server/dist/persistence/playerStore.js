@@ -7,6 +7,7 @@ exports.loadPlayer = loadPlayer;
 exports.savePlayer = savePlayer;
 const fs_1 = __importDefault(require("fs"));
 const path_1 = __importDefault(require("path"));
+const characterTemplates_1 = require("../data/characterTemplates");
 const DATA_DIR = path_1.default.join(__dirname, "..", "..", "data");
 const DATA_FILE = path_1.default.join(DATA_DIR, "players.json");
 function ensureFile() {
@@ -26,7 +27,12 @@ function readAll() {
 }
 function loadPlayer(username) {
     const all = readAll();
-    return all[username] ?? { username, level: 1, xp: 0, stats: { power: 10 } };
+    return (all[username] ?? {
+        username,
+        level: characterTemplates_1.DEFAULT_CHARACTER_TEMPLATE.level,
+        xp: characterTemplates_1.DEFAULT_CHARACTER_TEMPLATE.xp,
+        stats: { power: characterTemplates_1.DEFAULT_CHARACTER_TEMPLATE.stats.power },
+    });
 }
 function savePlayer(data) {
     const all = readAll();

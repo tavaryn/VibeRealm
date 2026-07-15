@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import { DEFAULT_CHARACTER_TEMPLATE } from "../data/characterTemplates";
 
 /**
  * Minimal username-based persistence for the MVP: level/xp saved to a JSON
@@ -7,6 +8,11 @@ import path from "path";
  *
  * Designed to be swapped for Postgres/Redis later without touching callers:
  * loadPlayer()/savePlayer() are the only two functions the room code calls.
+ *
+ * NOTE: DATA_DIR below (server/data/, one level up from src/) is the
+ * runtime *persistence* folder - unrelated to server/src/data/, the new
+ * static game-design data layer introduced in this ECS migration phase.
+ * Same word, different job.
  */
 export interface SavedPlayerData {
   username: string;
@@ -34,7 +40,14 @@ function readAll(): Record<string, SavedPlayerData> {
 
 export function loadPlayer(username: string): SavedPlayerData {
   const all = readAll();
-  return all[username] ?? { username, level: 1, xp: 0, stats: { power: 10 } };
+  return (
+    all[username] ?? {
+      username,
+      level: DEFAULT_CHARACTER_TEMPLATE.level,
+      xp: DEFAULT_CHARACTER_TEMPLATE.xp,
+      stats: { power: DEFAULT_CHARACTER_TEMPLATE.stats.power },
+    }
+  );
 }
 
 export function savePlayer(data: SavedPlayerData): void {

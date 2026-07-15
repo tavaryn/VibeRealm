@@ -11,22 +11,15 @@ const http_1 = require("http");
 const path_1 = __importDefault(require("path"));
 const fs_1 = __importDefault(require("fs"));
 const OverworldRoom_1 = require("./rooms/OverworldRoom");
+require("./admin/commands"); // side effect: registers all built-in admin commands
+const consoleInput_1 = require("./admin/consoleInput");
+const adminRuntime_1 = require("./admin/adminRuntime");
 const app = (0, express_1.default)();
 app.use((0, cors_1.default)());
 app.use(express_1.default.json());
-// Serve the client's production build from this same server/port, so
-// deploying only ever requires exposing one port (the game port below)
-// instead of a separate one for the Vite dev server. Run `npm run build`
-// in client/ first - see README.md.
-//
-// __dirname is server/src in dev (ts-node-dev) and server/dist after a
-// server-side build, so in both cases going up two levels reaches the
-// VibeRealm project root, then into client/dist.
 const clientDistPath = path_1.default.join(__dirname, "..", "..", "client", "dist");
 if (fs_1.default.existsSync(clientDistPath)) {
     app.use(express_1.default.static(clientDistPath));
-    // SPA fallback: any GET that isn't a static asset or the WebSocket
-    // upgrade still returns index.html, so a browser refresh works normally.
     app.get("*", (_req, res) => {
         res.sendFile(path_1.default.join(clientDistPath, "index.html"));
     });
@@ -41,8 +34,22 @@ const httpServer = (0, http_1.createServer)(app);
 const gameServer = new core_1.Server({
     transport: new ws_transport_1.WebSocketTransport({ server: httpServer }),
 });
-// Room name string here must match room.joinOrCreate("overworld", ...) on the client.
 gameServer.define("overworld", OverworldRoom_1.OverworldRoom);
+// Wired up for the /quit admin command (server/src/admin/commands.ts) - a
+// bare process.exit() alone wouldn't let in-flight sends finish or
+// release the port cleanly for an immediate restart.
+(0, adminRuntime_1.setShutdownHandler)(() => {
+    console.log("[server] Shutting down (requested via admin command)...");
+    httpServer.close(() => {
+        console.log("[server] HTTP/WebSocket server closed. Exiting.");
+        process.exit(0);
+    });
+    setTimeout(() => {
+        console.warn("[server] Forcing exit after shutdown timeout.");
+        process.exit(0);
+    }, 3000);
+});
 httpServer.listen(port, () => {
     console.log(`VibeRealm server listening on port ${port}`);
+    (0, consoleInput_1.startConsoleInput)();
 });

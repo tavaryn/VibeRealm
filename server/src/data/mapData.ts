@@ -1,10 +1,19 @@
 /**
  * Static overworld map for the MVP. 0 = walkable, 1 = wall/obstacle.
  *
+ * Part of the server's ECS "data layer" (server/src/data/) - pure static
+ * game data, no logic. NOT to be confused with server/data/ (lowercase,
+ * one level up from src/) - that's the *runtime* persistence folder
+ * (players.json, admins.json, bans.json), a completely different thing
+ * that happens to share the word "data".
+ *
  * NOTE: This is duplicated in client/src/map/mapData.ts so the client can
- * render tiles without waiting on a network round trip. For the MVP that's
- * an acceptable trade-off; once maps become dynamic or numerous, move this
- * into a shared package (or have the server send map data on room join).
+ * render tiles without waiting on a network round trip. That client copy
+ * is intentionally left where it is for this ECS migration phase (moving
+ * it would mean touching client/src/network/PredictedMovement.ts's import
+ * too, for a client-only rename with no behavior change) - still a known
+ * accepted trade-off per SPEC.md, revisit once maps become dynamic or a
+ * shared package exists.
  */
 export const TILE_SIZE = 32;
 export const MAP_WIDTH = 30;

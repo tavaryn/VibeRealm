@@ -19,13 +19,29 @@ function requireRoom(ctx: CommandContext): boolean {
 }
 
 commandRegistry.register({
-  name: "help",
-  description: "Lists available admin commands.",
-  usage: "/help",
+  name: "givexp",
+  description: "Grants XP to a player, applying level-ups the same way passive XP does.",
+  usage: "/givexp <username|sessionId> <amount>",
   adminOnly: true,
   execute: (ctx) => {
-    const lines = commandRegistry.list().map((c) => `${c.usage} - ${c.description}`);
-    ctx.reply(["Available commands:", ...lines].join("\n"));
+    if (!requireRoom(ctx)) return;
+    const [identifier, amountStr] = ctx.args;
+    const amount = Number(amountStr);
+    if (!identifier || !Number.isFinite(amount)) {
+      ctx.reply("Usage: /givexp <username|sessionId> <amount>");
+      return;
+    }
+
+    const target = findPlayerByIdentifier(ctx.room!, identifier);
+    if (!target) {
+      ctx.reply(`No connected player found matching "${identifier}".`);
+      return;
+    }
+
+    ctx.room!.grantXp(target.player, amount, target.sessionId);
+    ctx.reply(
+      `Granted ${amount} XP to "${target.player.username}" (now level ${target.player.level}, ${target.player.xp} xp).`
+    );
   },
 });
 

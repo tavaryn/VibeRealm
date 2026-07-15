@@ -2,7 +2,7 @@ import { Room, Client } from "@colyseus/core";
 import { OverworldState } from "./schema/OverworldState";
 import { Player } from "./schema/Player";
 import { Npc } from "./schema/Npc";
-import { isWalkable, TILE_SIZE, MAP_WIDTH, MAP_HEIGHT } from "../map/mapData";
+import { TILE_SIZE, MAP_WIDTH, MAP_HEIGHT } from "../data/mapData";
 import { loadPlayer, savePlayer } from "../persistence/playerStore";
 import { sanitizeMessage, ChatRateLimiter } from "../chat/chatModeration";
 import { createHostileMob, findRandomWalkableSpawn } from "../npc/npcFactory";
@@ -12,15 +12,18 @@ import { isAdmin } from "../admin/adminAuth";
 import { isBanned } from "../admin/banList";
 import { setActiveRoom, requestShutdown } from "../admin/adminRuntime";
 import { generateId } from "../utils/generateId";
+import { GAMEPLAY_CONFIG } from "../data/gameplayConfig";
+import { LEVELING_CONFIG } from "../data/levelingConfig";
+import { DEFAULT_CHARACTER_TEMPLATE } from "../data/characterTemplates";
+import { World } from "../ecs/World";
+import { MovementSystem } from "../ecs/systems/MovementSystem";
 
-const MOVE_SPEED = 120; // pixels per second
-const SIMULATION_TICK_MS = 1000 / 20; // 20 Hz server movement tick
-const XP_TICK_MS = 25000; // passive XP grant interval
-const XP_PER_TICK = 5;
-const NPC_SPAWN_INTERVAL_MS = 10000; // testing cadence - one mob every 10s
-const MAX_HOSTILE_MOBS = 15; // simple population cap so mobs don't grow unbounded
-const NPC_CONTACT_RADIUS = TILE_SIZE * 0.6; // how close a player must be to "touch" an NPC
-const NPC_CONTACT_COOLDOWN_MS = 1000; // avoid spamming contact events every tick while pressed against a mob
+const SIMULATION_TICK_MS = GAMEPLAY_CONFIG.simulationTickMs;
+const XP_TICK_MS = LEVELING_CONFIG.passiveXpIntervalMs;
+const XP_PER_TICK = LEVELING_CONFIG.passiveXpAmount;
+const NPC_SPAWN_INTERVAL_MS = GAMEPLAY_CONFIG.npcSpawnIntervalMs;
+const MAX_HOSTILE_MOBS = GAMEPLAY_CONFIG.maxHostileMobs;
+const NPC_CONTACT_COOLDOWN_MS = GAMEPLAY_CONFIG.npcContactCooldownMs;
 
 type TargetType = "player" | "npc";
 
@@ -30,6 +33,12 @@ type TargetType = "player" | "npc";
  * prediction support (move-ack), and an admin command system - both
  * the server console and in-game "/"-prefixed chat route into the same
  * shared CommandRegistry (see server/src/admin/).
+ *
+ * ECS migration status (Phase 2): movement/collision now lives in
+ * ecs/systems/MovementSystem.ts, run each tick via `this.world.update()`.
+ * NPC contact's cooldown+broadcast, targeting, and leveling are still
+ * directly on this class - later phases migrate those too. See
+ * ecs/World.ts for the scaffolding this phase started using.
  */
 export class OverworldRoom extends Room<OverworldState> {
   maxClients = 100;
@@ -37,11 +46,16 @@ export class OverworldRoom extends Room<OverworldState> {
   private chatRateLimiter = new ChatRateLimiter();
   // Keyed by Colyseus client.sessionId (NOT player.id) - must match the
   // key used in onLeave()'s cleanup below, or entries leak forever after
-  // a player disconnects. See handleNpcContact()/tryMove() for why this
-  // has to be threaded through explicitly rather than read off `player.id`
-  // (which, since the UUID v7 migration, is no longer the same string as
-  // the player's session id).
+  // a player disconnects. See handleNpcContact() for why this is threaded
+  // through explicitly rather than read off `player.id` (which, since the
+  // UUID v7 migration, is no longer the same string as the session id).
   private npcContactCooldown = new Map<string, number>();
+
+  // ECS world - owns the systems that run each simulation tick. Assigned
+  // in onCreate() (needs `this.state` to already exist), hence the
+  // definite-assignment assertion, same pattern Colyseus's own `state`
+  // field uses.
+  private world!: World;
 
   onCreate() {
     // VibeRealm has exactly one persistent shared overworld, not disposable
@@ -50,7 +64,16 @@ export class OverworldRoom extends Room<OverworldState> {
 
     this.setState(new OverworldState());
 
-    this.setSimulationInterval((deltaTime) => this.update(deltaTime), SIMULATION_TICK_MS);
+    this.world = new World(this.state);
+    // MovementSystem still reports NPC bumps back through this room's own
+    // handleNpcContact() (cooldown + broadcast) rather than owning that
+    // itself - see MovementSystem.ts's doc comment and Phase 3's planned
+    // NpcContactSystem, which will replace this callback wiring.
+    this.world.registerSystem(
+      new MovementSystem((player, npc, sessionId) => this.handleNpcContact(player, npc, sessionId))
+    );
+
+    this.setSimulationInterval((deltaTime) => this.world.update(deltaTime / 1000), SIMULATION_TICK_MS);
     this.clock.setInterval(() => this.grantPassiveXp(), XP_TICK_MS);
     this.clock.setInterval(() => this.spawnRandomHostileMob(), NPC_SPAWN_INTERVAL_MS);
 
@@ -89,14 +112,6 @@ export class OverworldRoom extends Room<OverworldState> {
 
       const raw = (payload?.text ?? "").trim();
 
-      // Anything starting with "/" is routed to the shared command
-      // registry instead of being broadcast as chat - regardless of
-      // whether the sender turns out to be an admin, since the registry
-      // itself checks and logs that. This is the exact same execute()
-      // path the server console uses (see admin/consoleInput.ts); only
-      // the actor type and reply mechanism differ - which is the whole
-      // point of the handler/registry pattern (a future web admin panel
-      // would be a third caller of the same function).
       if (raw.startsWith("/")) {
         await commandRegistry.execute(
           raw,
@@ -124,16 +139,10 @@ export class OverworldRoom extends Room<OverworldState> {
       });
     });
 
-    // Registers this room as "the" active room for admin commands (used
-    // by the server console, which isn't inside any room itself - see
-    // admin/adminRuntime.ts). Cleared in onDispose() below.
     setActiveRoom(this);
     console.log("[admin] OverworldRoom registered as the active room for admin commands.");
   }
 
-  // Runs before onJoin - rejecting here means a banned username never
-  // gets a Player created for it at all, rather than being kicked a
-  // moment after joining.
   async onAuth(_client: Client, options: { username?: string }) {
     const username = (options?.username || "").trim();
     if (username && isBanned(username)) {
@@ -147,19 +156,13 @@ export class OverworldRoom extends Room<OverworldState> {
     const saved = loadPlayer(username);
 
     const player = new Player();
-    // player.id is an independently-generated UUID v7 - deliberately NOT
-    // the same value as client.sessionId. `state.players` is still keyed
-    // by client.sessionId (Colyseus needs that for client.leave()/
-    // matching ctx.room.clients entries), and targeting/collision/NPC
-    // contact tracking continue to use that map key, not this field. See
-    // server/src/utils/generateId.ts and admin/entityLookup.ts.
     player.id = generateId("player");
     player.username = username;
     player.level = saved.level;
     player.xp = saved.xp;
-    player.stats.set("power", saved.stats?.power ?? 10);
-    player.maxHp = 100;
-    player.hp = 100;
+    player.stats.set("power", saved.stats?.power ?? DEFAULT_CHARACTER_TEMPLATE.stats.power);
+    player.maxHp = DEFAULT_CHARACTER_TEMPLATE.maxHp;
+    player.hp = DEFAULT_CHARACTER_TEMPLATE.hp;
     player.x = Math.floor(MAP_WIDTH / 2) * TILE_SIZE;
     player.y = Math.floor(MAP_HEIGHT / 2) * TILE_SIZE;
 
@@ -174,7 +177,7 @@ export class OverworldRoom extends Room<OverworldState> {
         username: player.username,
         level: player.level,
         xp: player.xp,
-        stats: { power: player.stats.get("power") ?? 10 },
+        stats: { power: player.stats.get("power") ?? DEFAULT_CHARACTER_TEMPLATE.stats.power },
       });
       this.state.players.delete(client.sessionId);
       this.chatRateLimiter.remove(client.sessionId);
@@ -192,26 +195,11 @@ export class OverworldRoom extends Room<OverworldState> {
   }
 
   onDispose() {
-    // Room is being destroyed (only expected on an actual server
-    // shutdown, since autoDispose=false keeps it alive otherwise) - clear
-    // the admin system's reference so console commands correctly report
-    // "no active room" instead of holding a stale one.
     setActiveRoom(null);
   }
 
-// Public so the admin /givexp command (server/src/admin/commands.ts)
-  // can reuse the exact same level-up logic as passive XP, rather than
-  // duplicating it. Takes `sessionId` explicitly (same fix as
-  // handleNpcContact() above) so the "level-up" broadcast's `sessionId`
-  // field is actually the player's Colyseus session id, not the UUID v7
-  // `player.id` - harmless today since GameScene's level-up handler only
-  // reads username/level, but wrong is wrong, and a future feature that
-  // *does* key off it (e.g. a "congrats!" toast only the leveling player
-  // sees) would have silently misfired otherwise.
   grantXp(player: Player, amount: number, sessionId: string) {
     player.xp += amount;
-    // while, not if - so one large admin grant can cross multiple level
-    // thresholds in a single call, same as enough passive ticks eventually would.
     while (player.xp >= xpForNextLevel(player.level)) {
       player.xp -= xpForNextLevel(player.level);
       player.level += 1;
@@ -247,82 +235,6 @@ export class OverworldRoom extends Room<OverworldState> {
     return true;
   }
 
-  private update(deltaTime: number) {
-    const dt = deltaTime / 1000;
-
-    // NOTE: now reads the sessionId key too (forEach's second callback
-    // arg) - needed so tryMove() can thread it down to handleNpcContact()
-    // for the npc-contact broadcast/cooldown fix. Nothing else here changed.
-    this.state.players.forEach((player, sessionId) => {
-      let dx = 0;
-      let dy = 0;
-      if (player.inputUp) dy -= 1;
-      if (player.inputDown) dy += 1;
-      if (player.inputLeft) dx -= 1;
-      if (player.inputRight) dx += 1;
-
-      if (dx === 0 && dy === 0) return;
-
-      const len = Math.sqrt(dx * dx + dy * dy);
-      dx = (dx / len) * MOVE_SPEED * dt;
-      dy = (dy / len) * MOVE_SPEED * dt;
-
-      this.tryMove(player, dx, dy, sessionId);
-    });
-  }
-
-  private tryMove(player: Player, dx: number, dy: number, sessionId: string) {
-    const nextX = player.x + dx;
-    const blockingNpcX = this.findNpcNear(nextX, player.y);
-    if (this.isPositionWalkable(nextX, player.y) && !blockingNpcX) {
-      player.x = nextX;
-    } else if (blockingNpcX) {
-      this.handleNpcContact(player, blockingNpcX, sessionId);
-    }
-
-    const nextY = player.y + dy;
-    const blockingNpcY = this.findNpcNear(player.x, nextY);
-    if (this.isPositionWalkable(player.x, nextY) && !blockingNpcY) {
-      player.y = nextY;
-    } else if (blockingNpcY) {
-      this.handleNpcContact(player, blockingNpcY, sessionId);
-    }
-  }
-
-  private isPositionWalkable(x: number, y: number): boolean {
-    const half = TILE_SIZE * 0.35;
-    const corners: [number, number][] = [
-      [x - half, y - half],
-      [x + half, y - half],
-      [x - half, y + half],
-      [x + half, y + half],
-    ];
-    return corners.every(([cx, cy]) =>
-      isWalkable(Math.floor(cx / TILE_SIZE), Math.floor(cy / TILE_SIZE))
-    );
-  }
-
-  private findNpcNear(x: number, y: number): Npc | undefined {
-    let found: Npc | undefined;
-    this.state.npcs.forEach((npc) => {
-      if (found) return;
-      const dx = x - npc.x;
-      const dy = y - npc.y;
-      if (Math.sqrt(dx * dx + dy * dy) < NPC_CONTACT_RADIUS) {
-        found = npc;
-      }
-    });
-    return found;
-  }
-
-  // FIXED: now takes `sessionId` explicitly instead of reading `player.id`.
-  // Since the UUID v7 migration, `player.id` is no longer the same string
-  // as the player's Colyseus session id, so both the cooldown map key and
-  // the "npc-contact" broadcast's `sessionId` field were silently wrong -
-  // the cooldown map leaked an entry per disconnect (never matched
-  // onLeave's `delete(client.sessionId)`), and the client's
-  // `msg.sessionId !== this.localSessionId` check in GameScene always
-  // failed, so nobody ever saw the "bumped into" toast anymore.
   private handleNpcContact(player: Player, npc: Npc, sessionId: string) {
     const now = Date.now();
     const last = this.npcContactCooldown.get(sessionId) ?? 0;
@@ -348,7 +260,7 @@ export class OverworldRoom extends Room<OverworldState> {
     console.log(`[npc] spawned ${npc.name} (${npc.id}) at (${spawnPoint.x}, ${spawnPoint.y})`);
   }
 
-private grantPassiveXp() {
+  private grantPassiveXp() {
     this.state.players.forEach((player, sessionId) => this.grantXp(player, XP_PER_TICK, sessionId));
   }
 }
