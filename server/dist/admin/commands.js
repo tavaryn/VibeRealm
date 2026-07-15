@@ -17,26 +17,13 @@ function requireRoom(ctx) {
     return true;
 }
 commandRegistry_1.commandRegistry.register({
-    name: "givexp",
-    description: "Grants XP to a player, applying level-ups the same way passive XP does.",
-    usage: "/givexp <username|sessionId> <amount>",
+    name: "help",
+    description: "Lists available admin commands.",
+    usage: "/help",
     adminOnly: true,
     execute: (ctx) => {
-        if (!requireRoom(ctx))
-            return;
-        const [identifier, amountStr] = ctx.args;
-        const amount = Number(amountStr);
-        if (!identifier || !Number.isFinite(amount)) {
-            ctx.reply("Usage: /givexp <username|sessionId> <amount>");
-            return;
-        }
-        const target = (0, entityLookup_1.findPlayerByIdentifier)(ctx.room, identifier);
-        if (!target) {
-            ctx.reply(`No connected player found matching "${identifier}".`);
-            return;
-        }
-        ctx.room.grantXp(target.player, amount, target.sessionId);
-        ctx.reply(`Granted ${amount} XP to "${target.player.username}" (now level ${target.player.level}, ${target.player.xp} xp).`);
+        const lines = commandRegistry_1.commandRegistry.list().map((c) => `${c.usage} - ${c.description}`);
+        ctx.reply(["Available commands:", ...lines].join("\n"));
     },
 });
 commandRegistry_1.commandRegistry.register({
@@ -64,8 +51,6 @@ commandRegistry_1.commandRegistry.register({
             message: "The server is shutting down for maintenance. Please rejoin shortly.",
         });
         ctx.reply("Shutting down...");
-        // Small delay so the broadcast above actually reaches clients before
-        // the process (and its WebSocket transport) goes away.
         setTimeout(() => ctx.requestShutdown(), 500);
     },
 });
@@ -83,12 +68,6 @@ commandRegistry_1.commandRegistry.register({
         const reason = reasonParts.join(" ") || "No reason given";
         (0, banList_1.addBan)(username, reason, (0, commandRegistry_1.describeActor)(ctx.actor));
         if (ctx.room) {
-            // NOTE: target.sessionId (the live-connection / MapSchema key), NOT
-            // target.player.id (the UUID v7 identity field) - since the UUID
-            // migration, `state.players` is still keyed by Colyseus's
-            // client.sessionId, but Player.id is now an independently
-            // generated value. See entityLookup.ts's PlayerLookupResult doc
-            // comment for the full reasoning.
             const target = (0, entityLookup_1.findPlayerByIdentifier)(ctx.room, username);
             if (target) {
                 const client = ctx.room.clients.find((c) => c.sessionId === target.sessionId);
@@ -132,7 +111,6 @@ commandRegistry_1.commandRegistry.register({
             ctx.reply(`No connected player found matching "${username}".`);
             return;
         }
-        // sessionId, not target.player.id - see /ban's comment above.
         const client = ctx.room.clients.find((c) => c.sessionId === target.sessionId);
         if (!client) {
             ctx.reply(`Found "${target.player.username}" in state but no matching connection - skipping.`);
@@ -157,11 +135,7 @@ commandRegistry_1.commandRegistry.register({
         }
         const target = (0, entityLookup_1.findPlayerByIdentifier)(ctx.room, identifier);
         if (target) {
-            // No death/respawn system exists yet (SPEC.md Roadmap #1) - the
-            // honest MVP behavior is "zero their hp and disconnect them" rather
-            // than faking a death/respawn flow that isn't built yet.
             target.player.hp = 0;
-            // sessionId, not target.player.id - see /ban's comment above.
             const client = ctx.room.clients.find((c) => c.sessionId === target.sessionId);
             client?.leave(4002, "Killed by admin");
             ctx.reply(`Killed player "${target.player.username}".`);
@@ -195,7 +169,7 @@ commandRegistry_1.commandRegistry.register({
             ctx.reply(`No connected player found matching "${identifier}".`);
             return;
         }
-        ctx.room.grantXp(target.player, amount);
+        ctx.room.grantXp(target.player, amount, target.sessionId);
         ctx.reply(`Granted ${amount} XP to "${target.player.username}" (now level ${target.player.level}, ${target.player.xp} xp).`);
     },
 });
