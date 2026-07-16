@@ -1,3 +1,4 @@
+// server/src/rooms/OverworldRoom.ts
 import { Room, Client } from "@colyseus/core";
 import { OverworldState } from "./schema/OverworldState";
 import { Player } from "./schema/Player";
@@ -12,59 +13,51 @@ import { generateId } from "../utils/generateId";
 import { GAMEPLAY_CONFIG } from "../data/gameplayConfig";
 import { LEVELING_CONFIG } from "../data/levelingConfig";
 import { DEFAULT_CHARACTER_TEMPLATE } from "../data/characterTemplates";
+import { STAT_NAMES, StatModifier } from "../data/statDefinitions";
 import { World } from "../ecs/World";
 import { MovementSystem } from "../ecs/systems/MovementSystem";
 import { NpcSpawnSystem } from "../ecs/systems/NpcSpawnSystem";
 import { NpcContactSystem } from "../ecs/systems/NpcContactSystem";
 import { TargetingSystem, TargetType } from "../ecs/systems/TargetingSystem";
 import { LevelingSystem } from "../ecs/systems/LevelingSystem";
+import { StatsSystem } from "../ecs/systems/StatsSystem";
 
 const SIMULATION_TICK_MS = GAMEPLAY_CONFIG.simulationTickMs;
 const XP_TICK_MS = LEVELING_CONFIG.passiveXpIntervalMs;
 const NPC_SPAWN_CHECK_INTERVAL_MS = GAMEPLAY_CONFIG.npcSpawnCheckIntervalMs;
 
 /**
- * Single shared overworld room. Server-authoritative movement + collision,
- * a slow passive XP timer, server-validated targeting, client-side
- * prediction support (move-ack), and an admin command system - both
- * the server console and in-game "/"-prefixed chat route into the same
- * shared CommandRegistry (see server/src/admin/).
+ * Single shared overworld room. Thin ECS adapter - see SPEC.md Section 3a.
  *
- * ECS migration status (Phase 4): targeting and leveling now live in
- * ecs/systems/TargetingSystem.ts and ecs/systems/LevelingSystem.ts,
- * alongside Phase 2's MovementSystem and Phase 3's NpcSpawnSystem/
- * NpcContactSystem. This class is now a thin adapter: message wiring,
- * lifecycle (onAuth/onJoin/onLeave/onDispose), and a couple of small
- * public wrappers (grantXp) kept specifically so the admin module
- * doesn't need to know any ECS systems exist - see LevelingSystem.ts's
- * doc comment.
+ * This version adds the Core Stats System: a `StatsSystem` instance
+ * (tick-registered, purely for buff expiry) that every Player and NPC's
+ * StatsComponent is registered with on join/spawn, and unregistered from
+ * on leave/removal. Three small wrapper methods (addStatModifier/
+ * removeStatModifier/getStatModifiers) exist for the same reason
+ * grantXp() does - so the admin module can drive stat modifiers without
+ * ever importing OverworldRoom or knowing StatsSystem exists.
  */
 export class OverworldRoom extends Room<OverworldState> {
   maxClients = 100;
 
   private chatRateLimiter = new ChatRateLimiter();
 
-  // ECS world + systems - all assigned in onCreate() (need `this.state`/
-  // `this.world` to already exist), hence the definite-assignment
-  // assertions, same pattern Colyseus's own `state` field uses.
   private world!: World;
   private npcSpawnSystem!: NpcSpawnSystem;
   private npcContactSystem!: NpcContactSystem;
   private targetingSystem!: TargetingSystem;
   private levelingSystem!: LevelingSystem;
+  private statsSystem!: StatsSystem;
 
   onCreate() {
-    // VibeRealm has exactly one persistent shared overworld, not disposable
-    // per-session rooms - see SPEC.md Section 3b for the full rationale.
     this.autoDispose = false;
 
     this.setState(new OverworldState());
 
     this.world = new World(this.state);
-    this.npcSpawnSystem = new NpcSpawnSystem(this.world);
+    this.statsSystem = new StatsSystem(this.world);
+    this.npcSpawnSystem = new NpcSpawnSystem(this.world, this.statsSystem);
     this.targetingSystem = new TargetingSystem(this.world);
-    // Both bound to this room's own broadcast() so neither system needs
-    // to import or know about Colyseus's Room type directly.
     this.npcContactSystem = new NpcContactSystem(this.world, (type, message) =>
       this.broadcast(type, message)
     );
@@ -72,14 +65,21 @@ export class OverworldRoom extends Room<OverworldState> {
       this.broadcast(type, message)
     );
 
-    // MovementSystem reports NPC bumps via this callback into
-    // NpcContactSystem, rather than owning cooldown/broadcast logic
-    // itself - see MovementSystem.ts's doc comment.
     this.world.registerSystem(
       new MovementSystem((player, npc, sessionId) =>
         this.npcContactSystem.handleContact(player, npc, sessionId)
       )
     );
+    // Tick-registered purely so timed stat modifiers (future buffs/
+    // debuffs) expire on their own - permanent modifiers (equipment)
+    // never touch this tick path. See StatsSystem.update().
+    this.world.registerSystem(this.statsSystem);
+
+    // Cleans up a departed NPC's stat-modifier entry (e.g. after /kill)
+    // the same way onLeave below does for players - avoids repeating the
+    // exact "leaked server-only component keyed by a removed entity"
+    // class of bug this project already hit once with npcContactCooldown.
+    this.state.npcs.onRemove((npc) => this.statsSystem.unregister(npc.id));
 
     this.setSimulationInterval((deltaTime) => this.world.update(deltaTime / 1000), SIMULATION_TICK_MS);
     this.clock.setInterval(() => this.levelingSystem.grantPassiveTick(), XP_TICK_MS);
@@ -113,7 +113,6 @@ export class OverworldRoom extends Room<OverworldState> {
       }
     );
 
-    // Global chat, with an admin-command interception step at the top.
     this.onMessage("chat", async (client, payload: { text?: string }) => {
       const player = this.state.players.get(client.sessionId);
       if (!player) return;
@@ -168,28 +167,38 @@ export class OverworldRoom extends Room<OverworldState> {
     player.username = username;
     player.level = saved.level;
     player.xp = saved.xp;
-    player.stats.set("power", saved.stats?.power ?? DEFAULT_CHARACTER_TEMPLATE.stats.power);
+
+    STAT_NAMES.forEach((stat) =>
+      player.stats.setBase(stat, saved.stats?.[stat] ?? DEFAULT_CHARACTER_TEMPLATE.stats[stat])
+    );
+
     player.maxHp = DEFAULT_CHARACTER_TEMPLATE.maxHp;
     player.hp = DEFAULT_CHARACTER_TEMPLATE.hp;
     player.x = Math.floor(MAP_WIDTH / 2) * TILE_SIZE;
     player.y = Math.floor(MAP_HEIGHT / 2) * TILE_SIZE;
 
     this.state.players.set(client.sessionId, player);
+    this.statsSystem.register(client.sessionId, player.stats);
     console.log(`[join] ${username} (${client.sessionId})`);
   }
 
   onLeave(client: Client) {
     const player = this.state.players.get(client.sessionId);
     if (player) {
+      const stats = Object.fromEntries(
+        STAT_NAMES.map((stat) => [stat, player.stats.getBase(stat)])
+      ) as Record<string, number>;
+
       savePlayer({
         username: player.username,
         level: player.level,
         xp: player.xp,
-        stats: { power: player.stats.get("power") ?? DEFAULT_CHARACTER_TEMPLATE.stats.power },
+        stats,
       });
       this.state.players.delete(client.sessionId);
       this.chatRateLimiter.remove(client.sessionId);
       this.npcContactSystem.clearFor(client.sessionId);
+      this.statsSystem.unregister(client.sessionId);
 
       this.state.players.forEach((otherPlayer) => {
         if (otherPlayer.targetType === "player" && otherPlayer.targetId === client.sessionId) {
@@ -206,11 +215,21 @@ export class OverworldRoom extends Room<OverworldState> {
     setActiveRoom(null);
   }
 
-  // Thin public wrapper, kept specifically so admin/types.ts's
-  // AdminRoomApi interface (and therefore admin/commands.ts's /givexp)
-  // can keep calling `room.grantXp(...)` directly, without the admin
-  // module needing to import or know that LevelingSystem exists.
   grantXp(player: Player, amount: number, sessionId: string) {
     this.levelingSystem.grantXp(player, amount, sessionId);
+  }
+
+  // Thin wrappers, same purpose as grantXp() above - keep the admin
+  // module decoupled from StatsSystem's existence.
+  addStatModifier(entityId: string, modifier: StatModifier) {
+    this.statsSystem.addModifier(entityId, modifier);
+  }
+
+  removeStatModifier(entityId: string, modifierId: string): boolean {
+    return this.statsSystem.removeModifier(entityId, modifierId);
+  }
+
+  getStatModifiers(entityId: string): readonly StatModifier[] {
+    return this.statsSystem.getModifiers(entityId);
   }
 }

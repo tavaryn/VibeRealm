@@ -1,14 +1,10 @@
+// server/src/admin/commands.ts
 import { commandRegistry, describeActor } from "./commandRegistry";
 import { addBan, removeBan } from "./banList";
 import { findPlayerByIdentifier, findNpcByIdentifier } from "./entityLookup";
-import { CommandContext } from "./types";
-
-/**
- * All built-in commands, registered as a side effect of importing this
- * file once at startup (see index.ts: `import "./admin/commands"`). Add
- * new commands (e.g. /spawn, /teleport) by copy-pasting one of these
- * `commandRegistry.register({...})` blocks - nothing else needs to change.
- */
+import { generateId } from "../utils/generateId";
+import { STAT_NAMES, StatName, StatModifier } from "../data/statDefinitions";
+import { CommandContext, AdminRoomApi } from "./types";
 
 function requireRoom(ctx: CommandContext): boolean {
   if (!ctx.room) {
@@ -16,6 +12,25 @@ function requireRoom(ctx: CommandContext): boolean {
     return false;
   }
   return true;
+}
+
+/**
+ * Shared "resolve identifier to (entityId, target schema)" helper for the
+ * new stats commands - mirrors the player-then-NPC fallback pattern
+ * /kill already uses. `entityId` is the sessionId for a player or
+ * npc.id for an NPC - the same key StatsSystem expects everywhere else.
+ */
+function resolveStatsTarget(
+  room: AdminRoomApi,
+  identifier: string
+): { entityId: string; target: any } | undefined {
+  const player = findPlayerByIdentifier(room, identifier);
+  if (player) return { entityId: player.sessionId, target: player.player };
+
+  const npc = findNpcByIdentifier(room, identifier);
+  if (npc) return { entityId: npc.id, target: npc };
+
+  return undefined;
 }
 
 commandRegistry.register({
@@ -188,5 +203,122 @@ commandRegistry.register({
     ctx.reply(
       `Granted ${amount} XP to "${target.player.username}" (now level ${target.player.level}, ${target.player.xp} xp).`
     );
+  },
+});
+
+commandRegistry.register({
+  name: "stats",
+  description: "Shows base/effective Core Stats and active modifiers for a player or NPC.",
+  usage: "/stats <playerUsername|sessionId|npcId|npcName>",
+  adminOnly: true,
+  execute: (ctx) => {
+    if (!requireRoom(ctx)) return;
+    const [identifier] = ctx.args;
+    if (!identifier) {
+      ctx.reply("Usage: /stats <identifier>");
+      return;
+    }
+
+    const resolved = resolveStatsTarget(ctx.room!, identifier);
+    if (!resolved) {
+      ctx.reply(`No player or NPC found matching "${identifier}".`);
+      return;
+    }
+
+    const { entityId, target } = resolved;
+    const statLines = STAT_NAMES.map(
+      (stat) => `  ${stat}: base ${target.stats.getBase(stat)} -> effective ${target.stats.getEffective(stat)}`
+    );
+
+    const modifiers = ctx.room!.getStatModifiers(entityId);
+    const modLines = modifiers.length
+      ? modifiers.map((m) => {
+          const expiry = m.expiresAt
+            ? `, expires in ${Math.max(0, Math.round((m.expiresAt - Date.now()) / 1000))}s`
+            : "";
+          return `  [${m.id}] ${m.stat} ${m.type} ${m.value} (from ${m.source}${expiry})`;
+        })
+      : ["  (no active modifiers)"];
+
+    ctx.reply(
+      [`Stats for "${identifier}" (${entityId}):`, ...statLines, "Active modifiers:", ...modLines].join("\n")
+    );
+  },
+});
+
+commandRegistry.register({
+  name: "addmod",
+  description: "Adds a stat modifier to a player or NPC - for testing gear/buffs before Combat MVP exists.",
+  usage: "/addmod <identifier> <stat> <flat|percent> <value> <durationSeconds|0> [source]",
+  adminOnly: true,
+  execute: (ctx) => {
+    if (!requireRoom(ctx)) return;
+    const [identifier, statRaw, typeRaw, valueRaw, durationRaw, ...sourceParts] = ctx.args;
+
+    if (!identifier || !statRaw || !typeRaw || !valueRaw || !durationRaw) {
+      ctx.reply("Usage: /addmod <identifier> <stat> <flat|percent> <value> <durationSeconds|0> [source]");
+      return;
+    }
+
+    if (!STAT_NAMES.includes(statRaw as StatName)) {
+      ctx.reply(`Unknown stat "${statRaw}". Valid stats: ${STAT_NAMES.join(", ")}`);
+      return;
+    }
+    if (typeRaw !== "flat" && typeRaw !== "percent") {
+      ctx.reply('Modifier type must be "flat" or "percent".');
+      return;
+    }
+
+    const value = Number(valueRaw);
+    const duration = Number(durationRaw);
+    if (!Number.isFinite(value) || !Number.isFinite(duration)) {
+      ctx.reply("Value and duration must be numbers (duration 0 = permanent).");
+      return;
+    }
+
+    const resolved = resolveStatsTarget(ctx.room!, identifier);
+    if (!resolved) {
+      ctx.reply(`No player or NPC found matching "${identifier}".`);
+      return;
+    }
+
+    const modifier: StatModifier = {
+      id: generateId("mod"),
+      stat: statRaw as StatName,
+      type: typeRaw,
+      value,
+      source: sourceParts.join(" ") || `admin (${describeActor(ctx.actor)})`,
+      expiresAt: duration > 0 ? Date.now() + duration * 1000 : undefined,
+    };
+
+    ctx.room!.addStatModifier(resolved.entityId, modifier);
+    ctx.reply(
+      `Added modifier [${modifier.id}] ${modifier.stat} ${modifier.type} ${modifier.value} to "${identifier}"` +
+        (duration > 0 ? ` (expires in ${duration}s).` : " (permanent).")
+    );
+  },
+});
+
+commandRegistry.register({
+  name: "removemod",
+  description: "Removes a previously-added stat modifier by its id (see /stats for ids).",
+  usage: "/removemod <identifier> <modifierId>",
+  adminOnly: true,
+  execute: (ctx) => {
+    if (!requireRoom(ctx)) return;
+    const [identifier, modifierId] = ctx.args;
+    if (!identifier || !modifierId) {
+      ctx.reply("Usage: /removemod <identifier> <modifierId>");
+      return;
+    }
+
+    const resolved = resolveStatsTarget(ctx.room!, identifier);
+    if (!resolved) {
+      ctx.reply(`No player or NPC found matching "${identifier}".`);
+      return;
+    }
+
+    const removed = ctx.room!.removeStatModifier(resolved.entityId, modifierId);
+    ctx.reply(removed ? `Removed modifier "${modifierId}".` : `No modifier "${modifierId}" found on "${identifier}".`);
   },
 });

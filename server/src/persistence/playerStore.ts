@@ -1,24 +1,23 @@
+// server/src/persistence/playerStore.ts
 import fs from "fs";
 import path from "path";
 import { DEFAULT_CHARACTER_TEMPLATE } from "../data/characterTemplates";
+import { StatName } from "../data/statDefinitions";
 
 /**
- * Minimal username-based persistence for the MVP: level/xp saved to a JSON
- * file on disconnect, loaded on join. No auth, no passwords.
+ * Minimal username-based persistence for the MVP: level/xp/stats saved to
+ * a JSON file on disconnect, loaded on join. No auth, no passwords.
  *
- * Designed to be swapped for Postgres/Redis later without touching callers:
- * loadPlayer()/savePlayer() are the only two functions the room code calls.
- *
- * NOTE: DATA_DIR below (server/data/, one level up from src/) is the
- * runtime *persistence* folder - unrelated to server/src/data/, the new
- * static game-design data layer introduced in this ECS migration phase.
- * Same word, different job.
+ * `stats` now holds the Core Stats System's 5 base values (previously
+ * just a placeholder `power` field) - saved as a plain Record so old
+ * save files missing a stat (or missing `stats` entirely) still load
+ * safely via loadPlayer()'s per-stat fallback to character defaults.
  */
 export interface SavedPlayerData {
   username: string;
   level: number;
   xp: number;
-  stats?: { power: number };
+  stats?: Partial<Record<StatName, number>>;
 }
 
 const DATA_DIR = path.join(__dirname, "..", "..", "data");
@@ -45,7 +44,7 @@ export function loadPlayer(username: string): SavedPlayerData {
       username,
       level: DEFAULT_CHARACTER_TEMPLATE.level,
       xp: DEFAULT_CHARACTER_TEMPLATE.xp,
-      stats: { power: DEFAULT_CHARACTER_TEMPLATE.stats.power },
+      stats: { ...DEFAULT_CHARACTER_TEMPLATE.stats },
     }
   );
 }

@@ -1,4 +1,6 @@
+// server/src/rooms/schema/Player.ts
 import { Schema, type } from "@colyseus/schema";
+import { StatsComponent } from "./StatsComponent";
 
 /**
  * Player schema - core per-player synced state.
@@ -6,20 +8,19 @@ import { Schema, type } from "@colyseus/schema";
  * `id` is a UUID v7 (see server/src/utils/generateId.ts) - a stable,
  * forward-compatible identity string, deliberately NOT the same value as
  * this player's Colyseus `client.sessionId` (which remains the actual
- * `state.players` MapSchema key - see OverworldRoom.onJoin). Currently
- * regenerated fresh on every join, same as sessionId was, until real
- * accounts exist to persist it (SPEC.md Roadmap #10).
+ * `state.players` MapSchema key - see OverworldRoom.onJoin).
  *
- * `hp`/`maxHp` are groundwork for the Combat MVP (SPEC.md roadmap #2) -
- * not consumed by any combat logic yet, but the Targeting System's HUD
- * needs them to render a target's HP bar, and `Npc` already has them, so
- * adding them here now keeps the two schemas symmetric.
+ * `hp`/`maxHp` are groundwork for the Combat MVP - not consumed by any
+ * combat logic yet, but the Targeting System's HUD needs them.
  *
- * `targetId`/`targetType` are for the Targeting System. They ARE synced
- * (rather than kept server-only) so any client could eventually show
- * "who is targeting whom" (e.g. a marker above a player being targeted by
- * someone else). Today only the local player's own target is consumed
- * client-side, to drive the target HUD frame.
+ * `stats` is the Core Stats System (Strength/Dexterity/Willpower/
+ * Charisma/Luck) - see StatsComponent.ts and
+ * ecs/systems/StatsSystem.ts for the full design. Base values are set on
+ * join (from persistence or character defaults); effective values are
+ * kept in sync by StatsSystem whenever a modifier is added/removed.
+ *
+ * `targetId`/`targetType` are for the Targeting System - synced so any
+ * client could eventually show "who is targeting whom."
  */
 export class Player extends Schema {
   @type("string") id = "";
@@ -30,15 +31,13 @@ export class Player extends Schema {
   @type("number") xp = 0;
   @type("number") hp = 100;
   @type("number") maxHp = 100;
-  @type({ map: "number" }) stats = new Map<string, number>();
+
+  @type(StatsComponent) stats = new StatsComponent();
 
   // "" = no target. Empty string instead of null/undefined since Schema
   // string fields don't support null, and it keeps client checks simple
   // (`if (player.targetId) { ... }`).
   @type("string") targetId = "";
-  // "player" | "npc" | "" (no target). Plain string rather than an enum
-  // type for Schema-encoding simplicity; validated server-side in
-  // OverworldRoom before ever being set.
   @type("string") targetType = "";
 
   // Server-only movement input flags, never synced to clients.

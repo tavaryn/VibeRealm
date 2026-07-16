@@ -1,12 +1,16 @@
+// server/src/rooms/schema/Npc.ts
 import { Schema, type } from "@colyseus/schema";
+import { StatsComponent } from "./StatsComponent";
 
 /**
  * NPC schema. `targetId`/`targetType` are intentionally NOT @type-decorated:
- * per the Targeting System requirements, NPC targets don't need client-side
- * display yet, so keeping them as plain (unsynced) server-side fields costs
- * zero sync bandwidth. They're still fully server-authoritative from day
- * one and ready for future aggro/chase AI to read/write - see SPEC.md
- * roadmap #3 - without any schema migration when that AI is built.
+ * NPC targets don't need client-side display yet, so keeping them as
+ * plain (unsynced) server-side fields costs zero sync bandwidth. They're
+ * still fully server-authoritative and ready for future aggro/chase AI.
+ *
+ * `stats` mirrors Player's Core Stats System - see StatsComponent.ts and
+ * ecs/systems/StatsSystem.ts. Base values are set from the NPC's
+ * template (data/npcTemplates.ts) at spawn time.
  */
 export class Npc extends Schema {
   @type("string") id = "";
@@ -17,12 +21,10 @@ export class Npc extends Schema {
   @type("number") hp = 50;
   @type("number") maxHp = 50;
   @type("boolean") isHostile = true;
-  @type({ map: "number" }) stats = new Map<string, number>();
+  @type(StatsComponent) stats = new StatsComponent();
   @type("string") behavior = "static";
 
-  // Server-only, unsynced - see class comment above. "self" is included
-  // in the union now so a future AI state machine can represent an NPC
-  // idling/guarding its own spawn point without a special-case value.
+  // Server-only, unsynced - see class comment above.
   targetId = "";
   targetType: "player" | "npc" | "self" | "" = "";
 }

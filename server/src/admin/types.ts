@@ -1,11 +1,16 @@
+// server/src/admin/types.ts
 import type { Client } from "@colyseus/core";
 import type { OverworldState } from "../rooms/schema/OverworldState";
+import type { StatModifier } from "../data/statDefinitions";
 
 export interface AdminRoomApi {
   state: OverworldState;
   clients: Client[];
   broadcast: (type: string, message?: any) => void;
   grantXp: (player: any, amount: number, sessionId: string) => void;
+  addStatModifier: (entityId: string, modifier: StatModifier) => void;
+  removeStatModifier: (entityId: string, modifierId: string) => boolean;
+  getStatModifiers: (entityId: string) => readonly StatModifier[];
 }
 
 export type CommandActorType = "console" | "chat";

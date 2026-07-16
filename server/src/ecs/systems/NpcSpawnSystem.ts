@@ -1,35 +1,25 @@
+// server/src/ecs/systems/NpcSpawnSystem.ts
 import { World } from "../World";
+import { StatsSystem } from "./StatsSystem";
 import { createHostileMob } from "../../npc/npcFactory";
 import { OVERWORLD_NPC_SPAWN_POINTS, NpcSpawnPoint } from "../../data/npcSpawnPoints";
 import { GAMEPLAY_CONFIG } from "../../data/gameplayConfig";
 import { TILE_SIZE } from "../../data/mapData";
 
 /**
- * TEMPORARY TEST-HARNESS DESIGN - not the final spawning mechanic.
+ * TEMPORARY TEST-HARNESS DESIGN - not the final spawning mechanic (see
+ * data/npcSpawnPoints.ts for the full "why").
  *
- * NPCs now spawn ONLY at the designated points in data/npcSpawnPoints.ts
- * (one NPC per point at a time) instead of any random walkable tile -
- * see that file's doc comment for the full "why." What's still
- * intentionally simple/temporary about THIS system specifically:
- *
- * - A single global interval (OverworldRoom's existing
- *   `this.clock.setInterval(...)`) re-checks every point on the same
- *   cadence, rather than each point independently managing its own
- *   respawn delay.
- * - Spawning is driven by wall-clock time, not by a zone/map actually
- *   being entered - there's only one zone today, so "on zone load"
- *   doesn't mean anything yet.
- *
- * Both are real future work once zones/maps and per-point respawn timers
- * exist (see SPEC.md roadmap) - deliberately not built out now against a
- * single hardcoded overworld that doesn't have "zones."
- *
- * Population is naturally capped by the number of designated spawn
- * points (one live NPC per point, checked via a simple proximity test)
- * rather than a separate arbitrary max-mob count.
+ * Now takes a StatsSystem reference so every newly-spawned NPC gets
+ * registered with the Core Stats System immediately (base values ->
+ * effective values, ready for future modifiers) as part of spawning -
+ * mirrors how OverworldRoom.onJoin registers a Player's stats.
  */
 export class NpcSpawnSystem {
-  constructor(private readonly world: World) {}
+  constructor(
+    private readonly world: World,
+    private readonly statsSystem: StatsSystem
+  ) {}
 
   /** Checks every designated spawn point and spawns into any that's currently empty. */
   tick(): void {
@@ -54,6 +44,7 @@ export class NpcSpawnSystem {
   private spawnAt(point: NpcSpawnPoint): void {
     const npc = createHostileMob(point.x, point.y);
     this.world.state.npcs.set(npc.id, npc);
+    this.statsSystem.register(npc.id, npc.stats);
     console.log(`[npc] spawned ${npc.name} (${npc.id}) at spawn point "${point.id}" (${point.x}, ${point.y})`);
   }
 }
