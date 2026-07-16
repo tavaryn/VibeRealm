@@ -1,8 +1,8 @@
 # VibeRealm - Browser MMORPG Project Specification
 
-**Last Updated:** 2026-07-10
-**Version:** 0.7 (MVP In Progress)
-**Status:** Playable MVP - movement (with client-side prediction), leveling, chat, NPCs, targeting, a login screen, disconnect handling, and a server-authoritative admin command system are implemented; the overworld room is persistent across client connects/disconnects.
+**Last Updated:** 2026-07-15
+**Version:** 0.8 (MVP In Progress)
+**Status:** Playable MVP - movement (with client-side prediction), leveling, chat, NPCs, targeting, a login screen, disconnect handling, a server-authoritative admin command system, UUID v7 entity identity, and a lightweight ECS architecture are implemented; the overworld room is persistent across client connects/disconnects.
 **Project Goal:** Build a playable MVP iteratively, one feature at a time, with Claude as ongoing development partner.
 
 ## 1. Vision & High-Level Goals
@@ -11,129 +11,117 @@ VibeRealm is a lightweight, browser-based 2D top-down MMORPG. It emphasizes **re
 Core fantasy: A cozy yet adventurous persistent world where players can see each other, level up through exploration and future activities, target and fend off (eventually fight) hostile mobs, and build a small community. The game is designed for solo development with AI assistance (Claude), easy local testing, and low-cost hosting for friends. The developer (as server operator) can also moderate and manage that world directly, via server console or in-game admin commands.
 
 **Target Audience:** Friends, indie game enthusiasts, and the developer (for learning and fun).
-**Success Metrics for MVP:** 2+ concurrent players can connect (including over the internet, not just LAN) via a proper login screen, move around a shared world with responsive, non-laggy-feeling controls, gain levels, chat in real-time, encounter simple hostile NPCs, target players/NPCs to see their name/level/HP, be returned cleanly to login if disconnected, and have the developer able to moderate/manage the world (ban, kick, grant XP, shut down gracefully) - all while the shared world itself (players' saved progress, NPCs) persists independently of any single client's connection, for as long as the server process runs.
+**Success Metrics for MVP:** 2+ concurrent players can connect (including over the internet, not just LAN) via a proper login screen, move around a shared world with responsive, non-laggy-feeling controls, gain levels, chat in real-time, encounter simple hostile NPCs at designated locations, target players/NPCs to see their name/level/HP, be returned cleanly to login if disconnected, and have the developer able to moderate/manage the world (ban, kick, grant XP, shut down gracefully) - all while the shared world itself (players' saved progress, NPCs) persists independently of any single client's connection, for as long as the server process runs.
 
 ## 2. Tech Stack
-- **Backend:** Colyseus (imported directly via `@colyseus/core`, not the `colyseus` meta-package - see Section 9 for why) + TypeScript + Node.js.
+- **Backend:** Colyseus (imported directly via `@colyseus/core`, not the `colyseus` meta-package - see Section 9 for why) + TypeScript + Node.js. Server-side game logic is organized as a lightweight ECS (Entities/Components/Systems) - see Section 3a.
 - **Frontend:** Phaser 3 (game rendering, camera, input handling, Arcade Physics for bounds) + plain HTML/CSS overlay for the login screen, HUD, target frame, and chat. Built with Vite.
-- **Persistence (MVP):** In-memory state (Colyseus Schema `MapSchema`) + username-based JSON file save/load (`server/data/players.json`) for level/xp/stats. Also JSON files for admin roles (`server/data/admins.json`) and bans (`server/data/bans.json`) - see Section 3c. Future: SQLite or Postgres, same load/save function signatures.
+- **Entity Identity:** UUID v7 (`uuid@^11`, pinned below `uuid@12`'s CommonJS-dropping breaking change) - see Section 3c.
+- **Persistence (MVP):** In-memory state (Colyseus Schema `MapSchema`) + username-based JSON file save/load (`server/data/players.json`) for level/xp/stats. Also JSON files for admin roles (`server/data/admins.json`) and bans (`server/data/bans.json`) - see Section 3d. Future: SQLite or Postgres, same load/save function signatures.
 - **Development Tools:** Git, VS Code (or similar), Claude Projects for AI assistance.
 - **Hosting:** Self-hosted on the developer's own machine with router port forwarding (single port, see Section 3). Render.com/Railway.app remain options for future always-on hosting.
 
-**Alternatives Considered:** Socket.io + Express (originally planned, replaced early with Colyseus for built-in Schema-based delta sync and room/instancing support). Pure Canvas (more boilerplate). Heavy frameworks like React (unnecessary for a game loop).
+**Alternatives Considered:** Socket.io + Express (originally planned, replaced early with Colyseus for built-in Schema-based delta sync and room/instancing support). Pure Canvas (more boilerplate). Heavy frameworks like React (unnecessary for a game loop). A full generic ECS engine/library (considered and deliberately rejected in favor of a lightweight, hand-rolled pattern sized for this project - see Section 3a).
 
 ## 3. Architecture Overview
 
-- **Client-Server Model:** Fully server-authoritative. Clients send only input state (movement keys, chat text, target selection, and now admin command text); the server simulates, validates, and syncs everything else.
-  - **Movement is client-side predicted with server reconciliation** (see the dedicated Section 3a below). Remote players and NPCs still interpolate toward server-confirmed positions; only the local player's own movement is predicted.
-  - Target selection follows the same request/validate/echo pattern: a client's click/TAB press is a *request*, and the target frame only updates once the server has validated and echoed it back via synced state - never assumed optimistically client-side. (Combat, when it arrives, is expected to follow this same request/validate/echo pattern rather than prediction, since instant "did I hit" client-side guessing is much riskier to get right than movement.)
-  - **Client entry is now gated by a login screen** and **the shared overworld room is persistent** across client connects/disconnects - see Section 3b below for both.
-  - **Admin commands** (server console or in-game `/`-prefixed chat) are validated, executed, and logged entirely server-side via a shared command registry - see Section 3c below.
+- **Client-Server Model:** Fully server-authoritative. Clients send only input state (movement keys, chat text, target selection, and admin command text); the server simulates, validates, and syncs everything else.
+  - **Movement is client-side predicted with server reconciliation** (see Section 3b). Remote players and NPCs still interpolate toward server-confirmed positions; only the local player's own movement is predicted.
+  - Target selection follows the same request/validate/echo pattern: a client's click/TAB press is a *request*, and the target frame only updates once the server has validated and echoed it back via synced state - never assumed optimistically client-side.
+  - **Client entry is gated by a login screen** and **the shared overworld room is persistent** across client connects/disconnects - see Section 3b.
+  - **Admin commands** (server console or in-game `/`-prefixed chat) are validated, executed, and logged entirely server-side via a shared command registry - see Section 3d.
 - **Core Components:**
-  - **Colyseus Rooms**: The main overworld runs in a single, persistent `OverworldRoom` (see Section 3b). Future dungeons/housing can use separate Room types for instancing.
-  - **Colyseus Schemas**: `Player` and `Npc` both live in `OverworldState` as `MapSchema`s. Clients receive only deltas/patches for efficiency - critical for scaling to hundreds of players.
-    - `Player` carries `hp`/`maxHp` (groundwork for Combat MVP, not yet consumed by any combat logic) and `targetId`/`targetType` (synced).
-    - `Npc` also carries `targetId`/`targetType`, but deliberately **not** synced (no `@type` decorator).
-  - **Targeting System**: Client requests (click or TAB) are validated server-side via `set-target` before being committed to synced state.
-  - **Admin Command System**: A single `CommandRegistry` (server-only, not part of any Schema) that both server console input and in-game chat route into - see Section 3c.
-  - **Client-Side Movement Prediction & Reconciliation**: See Section 3a.
-  - **Login Screen & Session Lifecycle**: See Section 3b.
-  - **Interest Management / Spatial Awareness**: Not yet implemented. NPC-vs-player collision, and target-candidate gathering for TAB-cycling, are both O(n) checks per relevant tick/keypress - fine at MVP scale, flagged as the first thing to revisit if entity counts grow.
-  - **Game Logic Separation**: Networking/state handled by Colyseus; game rules (movement validation, collision, leveling, chat moderation, NPC spawning, target validation, admin commands) live in clearly separated modules/methods for easier testing and future extraction.
-- **Data Flow**: Client shows a login screen on load → on submit, it connects and joins/creates `"overworld"` (rejected at `onAuth` if the username is banned) → once joined, the client sends input state (movement flags, tagged with a prediction sequence number), a chat/action message (including admin commands, prefixed with `/`), or a target request → `OverworldRoom` simulates/validates on a fixed 20Hz tick (movement) or immediately on message receipt (chat, targeting, move-ack, admin commands) → Schema state updates → Colyseus automatically broadcasts patches to relevant clients. If the client's connection to the room ever ends (see Section 3b), it tears down its local visuals/state and returns to the login screen. Chat messages remain a separate fire-and-forget broadcast event, not part of Schema state; admin command replies are similarly a unicast fire-and-forget message, not Schema state.
-- **Extensibility**: Designed so adding combat, classes, skills, NPC AI, new Room types, or new admin commands requires minimal changes to the core networking layer. `Npc` schema deliberately mirrors `Player`'s shape so future combat code can treat "anything with hp/stats/a target" uniformly. New admin commands are a single `commandRegistry.register({...})` call (Section 3c) - a future HTTP-based web admin panel would be a third caller of the same `commandRegistry.execute()` function, alongside console and chat.
-- **Deployment model - unified for dev AND production:** The Express server serves the client's build (`client/dist/`) on the same port Colyseus's WebSocket transport uses, so only **one process and one port** are involved end-to-end, in both development and when playing with friends. Day-to-day development is: `cd client && npm run build` once (and again after any client-side change), then `cd server && npm run dev` - connect at `http://localhost:2567` (or the LAN/public IP, same port). **Important habit:** the server does not currently watch/rebuild the client automatically - after editing anything under `client/src` or `client/index.html`, you must re-run `npm run build` in `client/` and hard-refresh the browser before the change will show up. The server terminal is now also an interactive admin console once running (see Section 3c) - typing there works alongside the normal `npm run dev` log output.
-- **Project Structure:** Two independent npm packages, not a single monorepo - chosen so the Vite-based Phaser client and the Colyseus/Node server can each use their own tooling, TS config, and dependency versions without conflict.
+  - **Colyseus Rooms**: The main overworld runs in a single, persistent `OverworldRoom`. Future dungeons/housing can use separate Room types for instancing.
+  - **Colyseus Schemas**: `Player` and `Npc` both live in `OverworldState` as `MapSchema`s. Clients receive only deltas/patches for efficiency.
+    - `Player` carries `id` (UUID v7 - see Section 3c), `hp`/`maxHp` (groundwork for Combat MVP), and `targetId`/`targetType` (synced).
+    - `Npc` also carries `id` (UUID v7, and the actual `state.npcs` MapSchema key) and `targetId`/`targetType`, deliberately **not** synced (no `@type` decorator).
+  - **ECS Systems** (`server/src/ecs/systems/`): `MovementSystem`, `NpcSpawnSystem`, `NpcContactSystem`, `TargetingSystem`, `LevelingSystem` - see Section 3a for the full architecture.
+  - **Admin Command System**: A single `CommandRegistry` (server-only, not part of any Schema, and not an ECS system) that both server console input and in-game chat route into - see Section 3d.
+  - **Game Logic Separation**: Networking/state handled by Colyseus; every piece of game logic (movement, collision, leveling, chat moderation, NPC spawning/contact, targeting, admin commands) lives in its own module - either an ECS system or, for message-driven/administrative concerns, its own dedicated file.
+- **Data Flow**: Client shows a login screen on load → on submit, it connects and joins/creates `"overworld"` (rejected at `onAuth` if the username is banned) → once joined, the client sends input state (movement flags, tagged with a prediction sequence number), a chat/action message (including admin commands, prefixed with `/`), or a target request → `OverworldRoom` forwards this into the relevant ECS system (movement flags update `Player` fields consumed by `MovementSystem` on the next tick; a `set-target` message calls `TargetingSystem.setTarget()` directly; admin commands route through `CommandRegistry`) → Schema state updates → Colyseus automatically broadcasts patches to relevant clients.
+- **Extensibility**: Designed so adding combat, classes, skills, NPC AI, new Room types, new admin commands, or new zones/maps requires minimal changes to the core networking layer or to unrelated systems. The ECS pattern (Section 3a) and the static data layer (Section 3c... see note below) mean new game content is usually a new data file entry and/or a new system, not a rewrite of existing ones.
+- **Deployment model - unified for dev AND production:** The Express server serves the client's build (`client/dist/`) on the same port Colyseus's WebSocket transport uses, so only **one process and one port** are involved end-to-end, in both development and when playing with friends. Day-to-day development is: `cd client && npm run build` once (and again after any client-side change), then `cd server && npm run dev` - connect at `http://localhost:2567` (or the LAN/public IP, same port). **Important habit:** the server does not currently watch/rebuild the client automatically - after editing anything under `client/src` or `client/index.html`, you must re-run `npm run build` in `client/` and hard-refresh the browser before the change will show up. The server terminal is also an interactive admin console once running (see Section 3d).
+- **Project Structure:** Two independent npm packages, not a single monorepo - chosen so the Vite-based Phaser client and the Colyseus/Node server can each use their own tooling, TS config, and dependency versions without conflict. `node_modules/` and `dist/` (both packages) and `server/data/*.json` (runtime persistence) are gitignored as of this version - previously committed by accident; see Section 10.
 
-### 3a. Client-Side Movement Prediction & Reconciliation
+### 3a. ECS Architecture *(new in v0.8)*
 
-**Problem it solves:** waiting for a full server round-trip before the local player visibly moves feels laggy and cumbersome, even on a fast connection, because every keypress has to cross the network twice (client→server→client) before anything changes on screen.
+**Problem it solves:** as the room's feature set grew (movement, NPCs, targeting, leveling, admin commands), all of that logic lived directly on `OverworldRoom` as private methods and fields. That worked fine early on, but every new mechanic (combat, skills, inventory, housing) would have kept adding to one increasingly large class, with game data (tile maps, mob stats, tuning numbers) hardcoded inline alongside the logic that used it.
 
-**How it works:**
-- The client mirrors the server's exact movement/collision math in a new module (`client/src/network/predictedMovement.ts`) - same `MOVE_SPEED`, same axis-separated wall-collision box. This is a **third duplicated copy of movement logic** (alongside the existing server/client `mapData.ts` tile-data duplication) and must be kept in sync manually if either ever changes - flagged the same way as the tile-data duplication already is.
-- Every rendered frame, the client immediately simulates the local player's movement using that frame's real delta time (**not** a fixed-timestep batch). This *predicted* position (`predictedX/Y` in `GameScene`) is what actually renders the local player - remote players/NPCs are unaffected and still interpolate as before.
-- Each local step is recorded in a short rolling history buffer (`{seq, input, dt}`). Every time the client sends a `"move"` message (still only on input-state-change, as before), it's tagged with the current sequence number.
-- The server, after applying an input change, unicasts back a `"move-ack"` message: `{seq, x, y}` - its authoritative position *at the moment it received that input change*.
-- The client discards history entries at or before that `seq`, then **replays** the remaining (already-locally-predicted) steps on top of the server-confirmed position to get its best current position estimate, written to a separate `serverX/Y` reference point (not directly into `predictedX/Y`, to avoid a visible "skip forward" when stopping/turning).
-- Every frame, `predictedX/Y` is gently blended toward `serverX/Y` (`applyServerCorrection`): small differences get nudged in smoothly; large differences (e.g. rejoining, a future teleport/respawn) snap instantly rather than visibly sliding across the map.
-- **Known accepted trade-off:** NPC collision is **not** predicted client-side (only wall/tile collision is) - NPCs are currently static.
-- **Guard against runaway catch-up:** per-frame delta is clamped (`MAX_FRAME_DELTA_MS`) so a backgrounded browser tab returning with a huge delta doesn't cause a sudden simulated leap.
+**Design philosophy - lightweight, not a generic engine:** a full textbook ECS (generic entity registry, component arrays, a query DSL) is built for engines managing thousands of heterogeneous entities with many optional component combinations. VibeRealm has two entity types and one room. Building a from-scratch ECS framework here would add indirection without payoff. Instead, VibeRealm adopts the *pattern* - data/logic separation, systems that don't know about "Player" specifically wherever avoidable - sized for this codebase:
 
-### 3b. Login Screen & Session Lifecycle
+- **Entities** are just UUID v7 strings (see Section 3c) - no `Entity` class exists.
+- **Synced components** remain flat fields directly on the `Player`/`Npc` Colyseus Schemas for now (not yet split into nested component sub-schemas - a possible future refinement, not required for the current feature set).
+- **Server-only (non-synced) components** - data clients never need to see - live in `World`'s generic component store (`world.componentStore<T>(name)`, a `Map<EntityId, T>` keyed by a chosen component name). Currently used for `NpcContactSystem`'s per-session cooldown timestamps.
+- **Systems** (`server/src/ecs/systems/`) are the actual game logic, each in its own file:
+  - `MovementSystem` - tick-based (implements `ecs/World.ts`'s `System` interface: `update(world, dtSeconds)`), runs every 20Hz simulation tick. Owns wall/NPC collision. Reports a blocked-by-NPC move via an injected `onNpcContact` callback rather than owning contact notification itself.
+  - `NpcSpawnSystem` - reactive-on-interval (not tick-based); `tick()` is called from `OverworldRoom`'s existing `clock.setInterval(...)`, checking every designated spawn point (see Section 3c's spawn-point redesign) and spawning into any that's currently empty.
+  - `NpcContactSystem` - purely reactive; `handleContact()` is called directly by `MovementSystem`'s injected callback whenever a move is blocked by an NPC. Owns the per-session cooldown (stored via `World`'s component store) and the `npc-contact` broadcast.
+  - `TargetingSystem` - purely reactive; `setTarget()` is called directly from `OverworldRoom`'s `"set-target"` message handler. Validates and applies target-selection requests.
+  - `LevelingSystem` - reactive/interval; `grantXp()` is called both by `OverworldRoom`'s passive-XP interval (via `grantPassiveTick()`) and by the `/givexp` admin command (via a thin `OverworldRoom.grantXp()` wrapper - see below). Owns the level-up threshold loop and the `level-up` broadcast.
+- **`World`** (`server/src/ecs/World.ts`) wraps the Colyseus `OverworldState`, holds the generic server-only component store, and provides a simple `registerSystem()`/`update()` scheduler for tick-based systems (currently just `MovementSystem`). Reactive/interval systems (the rest) aren't registered with this scheduler - they're constructed once and called into directly from wherever their trigger actually happens (a message handler, an interval, an admin command), since forcing every system through one uniform "tick" interface added no value for logic that isn't naturally tick-driven.
+- **`OverworldRoom` is now a thin adapter**: Colyseus lifecycle hooks (`onAuth`/`onJoin`/`onLeave`/`onDispose`), message wiring (`"move"`, `"set-target"`, `"chat"`), interval/tick scheduling, and two small compatibility wrappers (`grantXp()`) kept specifically so the admin module (`server/src/admin/`) can keep calling `room.grantXp(...)` directly without needing to import or know that ECS systems exist at all - preserving the existing "admin module never imports `OverworldRoom` directly, only a structural `AdminRoomApi` interface" rule from Section 9.
+- **Migration was done in four incremental phases**, each independently tested before moving to the next (matching the project's usual "one feature at a time" workflow): (1) data layer + scaffolding, no behavior change; (2) movement/collision → `MovementSystem`; (3) NPC spawning/contact → `NpcSpawnSystem`/`NpcContactSystem` (with a mid-phase redesign of the spawning mechanic itself - see Section 3c); (4) targeting/leveling → `TargetingSystem`/`LevelingSystem`.
+- **Known accepted trade-off:** synced components (`Position`/`Identity`/`Health`/`TargetRef`-equivalents) are not yet split into real nested Colyseus sub-schemas - `Player`/`Npc` remain flat field lists. Splitting them is a natural next refinement once a system needs to operate generically across "anything with health" or "anything with a position" rather than being written against `Player`/`Npc` specifically (e.g. Combat MVP, which needs damage logic to apply to both).
 
-**Problem it solves:** the previous flow used a blocking `window.prompt()` for a username immediately on page load, with no graceful handling if the connection ever dropped - a disconnected client just sat on a frozen/broken scene. Separately, the shared overworld room was quietly being destroyed and recreated (losing all NPCs) any time the last connected client left, because Colyseus rooms default to disposing themselves once empty.
+### 3b. Client-Side Movement Prediction & Login/Session Lifecycle
 
-**Client-side flow (login + disconnect):**
-- A proper HTML/CSS login screen (`client/index.html` `#login-screen`, wrapped by `client/src/ui/LoginScreen.ts`) is shown by default, as a full-viewport overlay above the game canvas (z-index above the in-game HUD). It collects a username via a form (a password field slot exists in the markup, hidden and unused, for future auth) and calls back into `GameScene.connectToServer(username)` on submit.
-- `GameScene.create()` no longer auto-connects - it sets up the map/input/HUD modules and the `LoginScreen` callback, then waits. Only once a room join succeeds does `LoginScreen.hide()` get called, revealing the game.
-- A failed join attempt (server unreachable, banned username, etc.) shows an inline error on the login screen rather than failing silently. **Known limitation:** a banned username currently surfaces the same generic `"Couldn't connect to the server. Please try again."` message as any other join failure (see Section 3c and Section 10) - the specific ban reason set server-side in `onAuth` isn't yet threaded through to this UI copy.
-- After a successful join, the client registers `room.onLeave((code) => ...)`, colyseus.js's built-in event for "this client's connection to the room has ended" - whether from an explicit kick/ban, a server restart/crash, or the network just dropping. This fires `GameScene.handleDisconnect()`, which:
-  - Tears down all player/NPC visuals and resets local prediction/targeting state (`resetGameState()`) - necessary because Phaser reuses the same `GameScene` instance across login attempts rather than recreating it, so nothing from the old session should leak into the next one.
-  - Shows the login screen again with a `"Disconnected from the server."` message, letting the player log back in (same or different username) without a page reload.
-- An `isConnected` boolean flag on `GameScene` gates the entire per-frame `update()` loop, plus outbound target/chat sends, so nothing tries to talk to a closed/absent room while the login screen is up.
-- **Keyboard input isolation:** Phaser's keyboard plugin listens globally on `window` and calls `preventDefault()` on any key bound via `addKey()` - including W/A/S/D - regardless of DOM focus. Both the chat input (`ChatUI`, pre-existing) and the login username field (`LoginScreen`) call `e.stopPropagation()` on their own `keydown` listeners so typing in either field never reaches Phaser's global handler and gets swallowed as a movement key.
-- **Known accepted trade-off:** there's no automatic reconnect/retry - a dropped connection always requires the player to manually submit the login form again. No session-resume (rejoining mid-session with the same identity/position) exists yet either. Both are natural next increments on top of this (see Roadmap).
+Unchanged in this version - see the equivalent sections in earlier SPEC revisions for full mechanics (client-side prediction with server reconciliation via `move-ack`; the HTML/CSS login screen and `room.onLeave`-driven disconnect handling; the persistent `autoDispose = false` overworld room). `MovementSystem` (Section 3a) now owns the server side of the collision math that client-side prediction mirrors, but the actual math and the prediction/reconciliation protocol between client and server are byte-for-byte unchanged from before the ECS migration - this was explicitly verified during Phase 2 testing.
 
-**Server-side flow (persistent room):**
-- `OverworldRoom` now sets `this.autoDispose = false;` as the first line of `onCreate()`. (`autoDispose` is a getter/setter *accessor* on the base Colyseus `Room` class, not a plain field - it must be assigned via `this.autoDispose = ...` inside a method, not declared as a class property, or TypeScript raises TS2610.)
-- **Why this was needed:** Colyseus's default (`autoDispose = true`) destroys a room - and all its state, including every spawned NPC - shortly after its last connected client leaves. Since VibeRealm's overworld is meant to be one persistent shared world (not a disposable per-session room), the *next* `joinOrCreate("overworld", ...)` was silently creating a **brand-new room with empty state**, which is why NPCs (and, had anyone tested it, any other room-only state) were vanishing across a disconnect/reconnect even though the server process itself never restarted.
-- With `autoDispose = false`, the room - and its simulation tick, passive-XP interval, and NPC spawner interval - keeps running even with zero clients connected, for as long as the server process is alive. This matches the "living world" fantasy (the world doesn't pause between sessions) and is a deliberate, permanent choice for VibeRealm's single-shared-overworld design, not a temporary workaround.
-- **Known accepted trade-off:** the NPC spawner and passive-XP timers now tick even while nobody is connected. Harmless today - passive XP has no players to apply to, and the NPC population cap (`MAX_HOSTILE_MOBS`) still applies - but worth remembering if a future system on one of these intervals ever becomes non-trivial to run with zero players present.
-- Per-player data (level/xp/stats) was already persisted to `server/data/players.json` independently of room lifecycle and is unaffected by this change - this fix is specifically about *room-scoped* state (NPCs today; anything else room-scoped in the future) surviving emptiness, not about player save data (which was already safe).
+### 3c. UUID v7 Entity Identity & the Static Data Layer *(UUID work done pre-v0.8, data layer new in v0.8)*
 
-### 3c. Admin Command System *(new in v0.7)*
+**UUID v7 migration:** All entity ids (`Player.id`, `Npc.id`) now use UUID v7 (`server/src/utils/generateId.ts`, backed by `uuid@^11`) instead of ad-hoc schemes (a copy of `client.sessionId` for players; a module-level incrementing counter for NPCs).
+- **Why UUID v7:** time-ordered (a millisecond timestamp is embedded, so ids sort naturally in logs/future DB indexes without a separate `createdAt` column); globally unique with no shared counter to coordinate (safe if VibeRealm ever spawns entities from more than one room/process); and a much better foundation for a *stable* per-account player identity once real accounts/auth exist (Roadmap #10) than a value tied to a single WebSocket connection.
+- **Critical distinction preserved:** `state.players` is still keyed by Colyseus's own `client.sessionId`, NOT by `player.id` - Colyseus needs `sessionId` for `client.leave()`/matching `room.clients` entries, and targeting/collision/NPC-contact-cooldown tracking all continue to use that map key. `player.id` is an independent, forward-compatible identity field, currently regenerated fresh on every join (same ephemerality as `sessionId` was) since no persisted per-account id exists yet in `players.json`. `Npc.id`, by contrast, IS the `state.npcs` MapSchema key (NPCs aren't tied to a live connection, so no split was needed there).
+- **Admin command impact:** `admin/entityLookup.ts`'s `findPlayerByIdentifier()` returns `{ player, sessionId }` rather than just the player Schema instance, since the two are no longer guaranteed to be the same string. `/ban`, `/kick`, `/kill` all resolve the live WebSocket client via the returned `sessionId`, never `player.id`. `admin/types.ts`'s `AdminRoomApi.grantXp` signature takes `sessionId` explicitly for the same reason (used for the `level-up` broadcast's `sessionId` field).
+- **Bugs this surfaced and fixed along the way:** `npcContactCooldown` was originally keyed by `player.id` but cleaned up on disconnect by `sessionId` - a silent memory leak (every disconnect left a stale entry) - fixed by threading `sessionId` through explicitly (now the `NpcContactSystem`'s component-store key, post-ECS-migration). The `npc-contact` and `level-up` broadcasts' `sessionId` fields had the same bug (harmless for `level-up`, since the client only reads `username`/`level` from it, but genuinely broke the `npc-contact` "bumped into" toast, since the client compares that field against its own session id).
 
-**Problem it solves:** managing a live shared world (banning a griefer, granting test XP, force-removing a stuck NPC, shutting the server down cleanly before a restart) previously required editing files or killing the process outright - there was no in-world or in-terminal way to moderate/manage state while the server was running.
+**Static data layer** (`server/src/data/`): every tunable number and content definition that used to be hardcoded inline (in `OverworldRoom.ts`'s top-of-file constants, or inside `npcFactory.ts`) now lives in its own file here:
+- `mapData.ts` - the tile grid (moved from the old `server/src/map/`, no content change).
+- `npcTemplates.ts` - NPC/mob definitions (name pool, base stats) as an array of templates, keyed by `id` - replaces `npcFactory.ts`'s old hardcoded name pool.
+- `npcSpawnPoints.ts` *(new)* - see the spawn-point redesign below.
+- `characterTemplates.ts` - default new-player stats (starting level/xp/hp/maxHp/power).
+- `levelingConfig.ts` - the XP-per-level formula's multiplier, passive XP amount/interval.
+- `gameplayConfig.ts` - movement speed, simulation tick rate, collision box ratio, NPC contact radius/cooldown, spawn-point occupancy radius.
+- **Not to be confused with** `server/data/` (lowercase, one level up from `src/`) - that's the *runtime* persistence folder (`players.json`, `admins.json`, `bans.json`), a completely unrelated thing that happens to share the word "data."
 
-**Design - one registry, multiple entry points:**
-- A single `CommandRegistry` (`server/src/admin/commandRegistry.ts`) maps a command name (e.g. `"ban"`) to a handler function (`CommandDefinition`). Registering a new command is one `commandRegistry.register({...})` call in `server/src/admin/commands.ts` - nothing about the registry, console input, or chat integration needs to change.
-- Two entry points feed the same `commandRegistry.execute()` function today:
-  - **Server console** (`server/src/admin/consoleInput.ts`) - uses Node's built-in `readline` to turn the server's own terminal into an interactive prompt (`viberealm> `) once the server is listening. The console is always treated as admin, since it's the person running the process.
-  - **In-game chat** - any chat message starting with `/` is intercepted in `OverworldRoom`'s existing `"chat"` message handler *before* sanitization/rate-limiting, and routed into the registry instead of being broadcast as a normal message.
-  - Both pass an `actor` (console vs. chat, with username/sessionId for chat), a `reply` callback (`console.log` for console; a new unicast `"command-reply"` message for chat), and a small `AdminRoomApi` view of the currently-active room.
-  - This is intentionally the same shape a **future web admin panel** would use - it would just be a third caller of `commandRegistry.execute()`, with its own actor type and an HTTP response as the `reply` callback, requiring no changes to the registry or existing commands.
-- **Permissions (MVP):** each command definition has an `adminOnly` flag. A chat-originated actor is admin if their username appears in `server/data/admins.json` (a plain JSON array, auto-created empty on first run) or the `ADMIN_USERNAMES` env var (comma-separated) - both checked case-insensitively. This is intentionally simple (no passwords/roles beyond "is or isn't an admin") and matches VibeRealm's existing username-only auth model; see Section 8 for the trust-model caveat this implies.
-- **Bans:** persisted to `server/data/bans.json` (username, reason, who banned them, timestamp). Checked in a new `OverworldRoom.onAuth()`, which runs *before* `onJoin` - a banned username's join is rejected outright (no `Player` is ever created for it) rather than letting them join and then kicking them a moment later. `/ban` also immediately disconnects the target if they're currently online; `/unban` reverses it.
-- **Logging:** every command attempt - success, permission denial, or unknown command - is logged server-side via `console.log`/`console.error` in the registry's `execute()` method, regardless of which entry point it came from. This is the closest thing to an audit trail today (see Section 10 for the "pipe stdout to a file" follow-up).
-- **Built-in commands (MVP):** `/help`, `/who` (list connected players), `/quit` (graceful shutdown - broadcasts a warning, then closes the HTTP/WebSocket server and exits), `/ban <username> [reason]`, `/unban <username>`, `/kick <username> [reason]` (disconnect without banning), `/kill <player|npc identifier>` (removes an NPC outright, or - since there's no death/respawn system yet - zeroes a player's HP and disconnects them), `/givexp <username|sessionId> <amount>` (reuses the exact same level-up loop as passive XP, now pulled into a shared `OverworldRoom.grantXp()` method).
-- **Entity lookup:** commands that target a specific player or NPC (`/ban`, `/kick`, `/kill`, `/givexp`) use a shared helper (`server/src/admin/entityLookup.ts`) that tries an exact Colyseus sessionId/npcId match first, then falls back to a case-insensitive username/name scan - so an admin can type either a display name or a raw session id.
-- **Known accepted MVP trade-offs:**
-  - `/kill` on a player is a stand-in for a real death system that doesn't exist yet (Roadmap #1) - it's honestly "zero hp and disconnect," not a proper death/respawn flow.
-  - `command-reply` and `server-shutdown` messages are sent to the client but not yet rendered anywhere in the UI (they currently only show up in the browser dev console) - wiring them into the existing chat/toast UI is a small near-term follow-up (see Roadmap).
-  - The banned-user login error isn't yet distinguished from a generic connection failure in the login screen's copy (see Section 3b and Section 10).
-  - `admins.json`/`bans.json` are re-read from disk on every check rather than cached, mirroring the existing `players.json` trade-off - fine at MVP's call frequency.
-  - Only one `OverworldRoom` instance is tracked as "the" active room for admin purposes (`server/src/admin/adminRuntime.ts`), matching VibeRealm's current single-shared-overworld design; this would need to become a lookup-by-room-id if multiple concurrent room instances (e.g. future dungeons) ever needed admin command support too.
+**NPC spawning redesign** *(mid-migration pivot)*: the original ECS-migration plan simply relocated the pre-existing "spawn one mob every ~10s at any random walkable tile, up to a population cap of 15" mechanic into a system unchanged. Partway through Phase 3, this was deliberately redesigned instead, since that mechanic was only ever a testing convenience and was never meant to survive into the real game (which will spawn NPCs at fixed per-zone locations - camps, dungeon entrances, patrol posts):
+- `data/npcSpawnPoints.ts` now lists fixed spawn point coordinates (currently 8, scattered around the single overworld zone) as `{ id, x, y, templateId }` - a flat array today since there's only one zone, designed to extend naturally to `Record<zoneId, NpcSpawnPoint[]>` once multiple zones/maps exist, without needing another redesign.
+- `NpcSpawnSystem.tick()` (still triggered by the same coarse `clock.setInterval`, per `gameplayConfig.npcSpawnCheckIntervalMs`) checks every designated point and spawns into any that's currently unoccupied (a simple proximity check against existing NPCs, `gameplayConfig.spawnPointOccupancyRadiusRatio`).
+- Population is now **emergent** from the number of designated spawn points rather than a separate arbitrary cap - `gameplayConfig.maxHostileMobs` was removed entirely.
+- `templateId` on each spawn point is forward-looking and not yet consumed (`npcFactory.createHostileMob()` still only knows the single `hostile_basic` template) - ready for whenever a second mob type exists and different points want different mobs.
+- **Known accepted trade-off, deliberately temporary:** a single global interval re-checks every point on the same cadence (rather than each point independently managing its own respawn delay), and spawning is still driven by wall-clock time rather than a zone/map actually being "entered" (there's only one zone today, so that concept doesn't mean anything yet). Both are real future work once zones/maps exist (see Roadmap).
+
+### 3d. Admin Command System
+
+Unchanged in this version - see earlier SPEC revisions for full mechanics (single `CommandRegistry` shared by the server console and in-game `/`-prefixed chat; bans persisted and checked in `onAuth`; built-in commands `/help`, `/who`, `/quit`, `/ban`, `/unban`, `/kick`, `/kill`, `/givexp`). The only change from the UUID v7 and ECS work is internal: `entityLookup.ts`'s return shape (Section 3c) and `OverworldRoom.grantXp()` now delegating to `LevelingSystem` (Section 3a) instead of containing the logic directly - the admin module's own code and the command set itself are unaffected.
 
 ## 4. Data Models & Schemas
 
 **Player Schema** (Colyseus Schema, `server/src/rooms/schema/Player.ts`):
 ```ts
 class Player extends Schema {
-  @type("string") id;
+  @type("string") id;           // UUID v7 - NOT the same as this player's Colyseus sessionId (see Section 3c)
   @type("string") username;
   @type("number") x;
   @type("number") y;
   @type("number") level;       // starts at 1
   @type("number") xp;          // starts at 0
-  @type("number") hp;          // starts at 100; groundwork for Combat MVP, unused by any logic yet (also settable via /kill and unaffected-but-visible via /givexp's level-ups)
+  @type("number") hp;          // starts at 100; groundwork for Combat MVP, unused by any logic yet
   @type("number") maxHp;       // starts at 100
   @type({ map: "number" }) stats;   // extensible; currently just "power" (default 10)
 
-  // Targeting System fields - synced so any client could eventually show
-  // "who is targeting whom." Only the local player's own target is
-  // consumed client-side today (drives the target HUD frame).
   @type("string") targetId;    // "" = no target
   @type("string") targetType;  // "player" | "npc" | ""
 
   // Server-only, not synced to clients:
-  inputUp; inputDown; inputLeft; inputRight;  // current movement input flags
+  inputUp; inputDown; inputLeft; inputRight;  // current movement input flags, read by MovementSystem
 }
 ```
 
 **NPC Schema** (Colyseus Schema, `server/src/rooms/schema/Npc.ts`):
 ```ts
 class Npc extends Schema {
-  @type("string") id;
+  @type("string") id;    // UUID v7 - this IS the state.npcs MapSchema key (see Section 3c)
   @type("string") name;
   @type("number") x;
   @type("number") y;
@@ -144,167 +132,164 @@ class Npc extends Schema {
   @type({ map: "number" }) stats;   // mirrors Player.stats, currently "power"
   @type("string") behavior;         // placeholder for future AI state machine; always "static" for now
 
-  // Targeting System fields, deliberately NOT @type-decorated - no client
-  // needs to see an NPC's target yet, so this costs zero sync bandwidth.
-  // Still fully server-authoritative and ready for future aggro/chase AI.
-  targetId;    // "" = no target
-  targetType;  // "player" | "npc" | "self" | ""
+  // Server-only, deliberately unsynced:
+  targetId; targetType;
 }
 ```
 
 **Room State** (`OverworldState`):
 ```ts
 class OverworldState extends Schema {
-  @type({ map: Player }) players;
-  @type({ map: Npc }) npcs;
+  @type({ map: Player }) players;   // keyed by client.sessionId, NOT Player.id - see Section 3c
+  @type({ map: Npc }) npcs;         // keyed by Npc.id
 }
 ```
 
 **World/Map:**
-- 30×30 tile grid, `0` = walkable, `1` = wall/obstacle. Border tiles are always walls; a handful of scattered obstacle tiles are hardcoded.
-- **Important:** the tile array is duplicated between `server/src/map/mapData.ts` (authoritative, used for collision) and `client/src/map/mapData.ts` (render-only **and** used for client-side movement prediction). They must be kept in sync manually until this is refactored into a shared package. The client copy also exports an `isWalkable()` helper mirroring the server's, used by `predictedMovement.ts`.
-- Player/NPC collision uses a small AABB-style corner check against tiles (`isWalkable`), and a simple radius-based circle check between entities (NPCs aren't tile-snapped, since they're expected to eventually move). This exact corner-check math is duplicated client-side too (`predictedMovement.ts`) for prediction purposes.
+- 30×30 tile grid (`server/src/data/mapData.ts`), `0` = walkable, `1` = wall/obstacle. Border tiles are always walls; a handful of scattered obstacle tiles are hardcoded.
+- **Important:** the tile array is duplicated between `server/src/data/mapData.ts` (authoritative, used for collision) and `client/src/map/mapData.ts` (render-only **and** used for client-side movement prediction) - unchanged accepted trade-off, see Section 8.
+- Player/NPC collision uses a small AABB-style corner check against tiles (`MovementSystem.isPositionWalkable`), and a simple radius-based circle check between entities. This exact corner-check math is duplicated client-side too (`predictedMovement.ts`) for prediction purposes.
+
+**NPC Spawn Points** (`server/src/data/npcSpawnPoints.ts`) - see Section 3c for the full design:
+```ts
+interface NpcSpawnPoint {
+  id: string;
+  x: number;
+  y: number;
+  templateId: string;  // not yet consumed - reserved for multiple mob templates
+}
+```
 
 **Persistence:**
-- `server/data/players.json`, keyed by username: `{ username, level, xp, stats: { power } }`. Loaded on join, saved on disconnect. No auth/passwords for MVP. `hp`/`maxHp` are not currently persisted.
-- **Room-scoped state (NPCs, etc.) is persistent for the lifetime of the server process** (see Section 3b) rather than tied to client connections - it is *not* saved to disk, so it still resets on an actual server restart, same as before.
-- **`server/data/admins.json`** *(new)*: a plain JSON array of admin usernames, checked case-insensitively. Not a Colyseus Schema/synced field - purely server-side, read on demand by `isAdmin()`. Auto-created empty if missing.
-- **`server/data/bans.json`** *(new)*: an array of `{ username, reason, bannedBy, bannedAt }` entries. Also purely server-side; checked in `OverworldRoom.onAuth()` before a join is allowed to proceed.
+- `server/data/players.json`, keyed by username: `{ username, level, xp, stats: { power } }`. Loaded on join, saved on disconnect. `hp`/`maxHp` are not currently persisted.
+- **Room-scoped state (NPCs, etc.) is persistent for the lifetime of the server process** rather than tied to client connections - it is *not* saved to disk, so it still resets on an actual server restart.
+- **`server/data/admins.json`**: a plain JSON array of admin usernames, checked case-insensitively.
+- **`server/data/bans.json`**: an array of `{ username, reason, bannedBy, bannedAt }` entries.
+- All three are gitignored as of this version (Section 10) - runtime instance data, not source.
 
 ## 5. MVP Features (Implemented)
 
-**Admin Command System** *(new)*
-- Server console (the same terminal running `npm run dev`/`npm start`) becomes an interactive prompt once the server starts - type a command (with or without a leading `/`) and press Enter.
-- In-game: any admin whose username is in `server/data/admins.json` or the `ADMIN_USERNAMES` env var can type a `/`-prefixed message in chat to run the same commands, with results sent back privately (currently logged to the browser dev console only - not yet rendered in the chat UI).
-- Built-in commands: `/help`, `/who`, `/quit`, `/ban`, `/unban`, `/kick`, `/kill`, `/givexp`. All server-validated and logged regardless of entry point.
-- Bans are persisted (`server/data/bans.json`) and checked before a join is ever accepted (`onAuth`), not just after the fact.
-- New commands require only a single registration call in `server/src/admin/commands.ts` - no changes to the registry, console wiring, or chat integration.
+**ECS Architecture** *(new)*
+- Movement/collision, NPC spawning, NPC contact notification, targeting, and leveling each live in their own system under `server/src/ecs/systems/`, coordinated by a lightweight `World` (Section 3a).
+- All tunable numbers and content definitions (map, NPC templates/spawn points, character defaults, leveling curve, gameplay tuning) live in `server/src/data/`, not hardcoded inline in logic files.
+
+**UUID v7 Entity Identity** *(new, documented for the first time this version)*
+- Every player and NPC has a stable UUID v7 `id`, independent of Colyseus's own `client.sessionId` for players (Section 3c).
+
+**Admin Command System**
+- Server console + in-game `/`-prefixed chat, both routed through a single shared registry. Built-ins: `/help`, `/who`, `/quit`, `/ban`, `/unban`, `/kick`, `/kill`, `/givexp`. Unchanged this version aside from internal plumbing (Section 3c/3d).
 
 **Login Screen & Session Lifecycle**
-- Full-viewport HTML/CSS login screen shown on load, above the game canvas. Username field (password field slot present in markup for future auth, currently hidden/unused).
-- Submitting the form connects and joins the shared overworld; the screen hides only once the join succeeds. A failed connection attempt (including a banned username) shows an inline error and lets the player retry without reloading.
-- If the client's connection to the room ends for any reason (kicked, banned, server restart, network drop), the client detects it (`room.onLeave`), tears down all local game state/visuals, and returns to the login screen with a "Disconnected from the server." message - ready to log back in.
-- WASD (and the rest of the keyboard) work normally for typing in both the login username field and the chat box - keystrokes in either are kept from reaching Phaser's global movement-key bindings.
+- Unchanged this version - full-viewport login screen, graceful disconnect handling, persistent overworld room.
 
 **Overworld Exploration**
-- 30×30 tile map, colored-rectangle rendering (green = walkable, gray = wall), camera follows local player.
-- Player and NPC labels show name/level above their shape.
+- 30×30 tile map, colored-rectangle rendering, camera follows local player.
 
 **Player Movement**
-- WASD or arrow keys. Client sends only input-state changes (not positions); server simulates movement at a fixed 20Hz tick and validates collision (walls + NPCs).
-- **Client-side prediction + reconciliation**: the local player's own movement is predicted instantly client-side and smoothly corrected against the server - see Section 3a for full mechanics. Feels responsive/instant regardless of network round-trip time.
-- Remote players still interpolate smoothly between server position updates, unchanged.
+- WASD or arrow keys, server-authoritative at a fixed 20Hz tick (now `MovementSystem`), client-side prediction + reconciliation unchanged and verified byte-for-byte identical post-migration.
 
 **Leveling & Progression**
-- Start at level 1, 0 XP. Passive XP gain (+5) every ~25 seconds while connected, server-validated.
-- Level-up threshold: `level * 100` XP. On level up, server broadcasts a `level-up` event; client shows a toast. Now shared between the passive-XP tick and the `/givexp` admin command via `OverworldRoom.grantXp()`.
-- HUD (HTML overlay, top-left): username, level, XP progress bar.
+- Passive XP gain (+5) every ~25s, level-up threshold `level * 100`, now owned by `LevelingSystem`. HUD unchanged.
 
 **Chat System**
-- Global chat, HTML overlay (bottom-left): scrollable log + input box.
-- Press Enter to open chat (if not already focused) or send (if focused); Escape or clicking elsewhere returns keyboard control to movement.
-- Server sanitizes (strips HTML tags, trims, caps at 200 chars) and rate-limits (600ms min interval per session) before broadcasting `chat-message` events. Messages starting with `/` skip sanitization/rate-limiting entirely and are routed to the admin command system instead (see Section 3c).
-- Client renders with `textContent` only (never `innerHTML`) as defense-in-depth against injected markup.
+- Unchanged this version - global chat, sanitized/rate-limited, `/`-prefixed messages routed to admin commands.
 
-**NPCs (Hostile Mobs)**
-- Server spawns 1 hostile mob every ~10 seconds at a random walkable tile, capped at 15 concurrent mobs.
-- Synced via `OverworldState.npcs` (`MapSchema<Npc>`), rendered client-side as colored rectangles (red = hostile; a neutral color is reserved for future friendly NPCs) with name/level labels.
-- Treated as simple circular obstacles for player movement (can't walk through them) - server-side only; **not** predicted client-side (see Section 3a trade-off note).
-- Bumping into a hostile NPC triggers a rate-limited (1s) toast notification (`npc-contact` message) and a server console log.
-- `behavior` field on `Npc` exists but is unused - reserved for future patrol/aggro/chase AI.
-- Can be force-removed via the `/kill` admin command.
-- **The NPC population persists across client disconnects/reconnects** - the overworld room itself doesn't get torn down when empty, so NPCs (and the spawner/population cap) keep going independent of who's currently connected (see Section 3b).
+**NPCs (Hostile Mobs)** *(spawning mechanic redesigned this version)*
+- Spawn only at 8 designated fixed points scattered around the overworld (`data/npcSpawnPoints.ts`), one NPC per point, checked on a coarse interval (`NpcSpawnSystem`) - see Section 3c for the full redesign rationale. Population is emergent from spawn point count, not a separate cap.
+- Bumping into a hostile NPC still triggers a rate-limited (1s) toast notification (`NpcContactSystem`), now correctly keyed by session id end-to-end (Section 3c bug fix).
+- Can still be force-removed via `/kill`; a new one will respawn at that point once the next spawn-point check runs.
 
 **Targeting System**
-- Players can select a target by clicking a player/NPC in the Phaser scene, or by pressing TAB to cycle nearest-first through currently visible players and NPCs (wraps around at the end of the list).
-- Players can clear their target with **Escape** or by **clicking anywhere on the map with nothing targetable under the pointer**.
-- Click/TAB/clear requests are sent via a `set-target` message; the server validates before committing.
-- Target HUD (HTML overlay, top-right): shows the current target's name, level, and an HP bar, driven entirely by the local player's own synced target fields.
-- If the current target disconnects (players) the server clears the targeting player's target fields, and the HUD frame hides itself.
-- No combat effect yet - purely selection/display, feeding directly into Combat MVP next.
+- Unchanged this version - click or TAB-cycle, server-validated via `TargetingSystem`, target HUD unchanged.
 
 **Multiplayer & Persistence**
-- Join/leave handling; other players rendered as distinct colored circles with labels.
-- Username-based "login" (no passwords) via the login screen described above, now gated by a ban check (`onAuth`) before any join is accepted.
-- Level/xp/stats saved on disconnect, loaded on join.
+- Unchanged this version.
 
 **UI/Controls**
-- Full browser window canvas (800×600 internal resolution).
-- HTML overlays: login screen (full-viewport, shown until connected), top-left HUD, top-right target frame, bottom-left chat panel, dynamically-created toast notifications.
-- Keyboard/mouse for MVP (WASD/arrows for movement, Enter/Escape for chat, click or TAB to target, Escape or clicking empty map space to clear target). Admin commands via the same chat input (`/`-prefixed) or the server's own terminal.
+- Unchanged this version.
 
 ## 6. Future Features Roadmap (Prioritized)
 
-1. **Combat MVP**: melee attack message, server-validated hit detection against the player's current target (reusing the Targeting System's validation pattern), XP/loot on kill. Builds directly on the existing NPC-contact hook and the `hp`/`maxHp`/target fields.
-2. **NPC AI**: patrol/aggro/chase behavior, using the already-present (currently unused) `behavior` field and the unsynced `targetId`/`targetType` fields on `Npc`. Will also mean revisiting the "NPCs aren't predicted client-side" trade-off from Section 3a, since moving NPCs make that gap more noticeable.
-3. **Better collision/tilemap authoring**: load a Tiled JSON map instead of the hardcoded array, ideally from a single shared source instead of the current server/client duplication (which spans both `mapData.ts` *and* the movement-collision math in `predictedMovement.ts`).
-4. **Basic interest management**: only send nearby players'/NPCs' state deltas once entity counts grow, using a simple grid bucket per room. Also relevant to TAB-cycle candidate gathering, currently O(n) per keypress.
-5. **Wire admin `command-reply`/`server-shutdown` into visible UI** *(new)*: currently these client messages only reach the browser dev console - a small chat-log or toast integration would make in-game admin command usage actually usable without opening devtools.
+1. **Combat MVP**: melee attack message, server-validated hit detection against the player's current target, XP/loot on kill. A natural next candidate for a new `ecs/systems/CombatSystem.ts`. May also be the point where `hp`/`maxHp`/position get split into real nested Colyseus sub-schemas (Section 3a's noted trade-off), since combat needs to apply generically to both Player and Npc.
+2. **NPC AI**: patrol/aggro/chase behavior, using the already-present (currently unused) `behavior` field and the unsynced `targetId`/`targetType` fields on `Npc`. Will also mean revisiting the "NPCs aren't predicted client-side" trade-off.
+3. **Zones/multiple maps**: extend `data/npcSpawnPoints.ts` from a flat array to `Record<zoneId, NpcSpawnPoint[]>` (or one file per zone), and move spawning from a global wall-clock interval to zone-load-triggered/per-point respawn timers (Section 3c's two flagged temporary simplifications). Likely pairs naturally with loading real Tiled JSON maps instead of the hardcoded array (old Roadmap #3).
+4. **Basic interest management**: only send nearby players'/NPCs' state deltas once entity counts grow.
+5. **Wire admin `command-reply`/`server-shutdown` into visible UI**: currently only visible via the browser dev console.
 6. **Classes & Skills**: class selection, ability hotbar, different playstyles.
 7. **Content**: instanced dungeons (separate Colyseus room types), quests.
 8. **Social & Persistence (Later)**: player housing, trading, guilds, proximity chat.
-9. **Persistence upgrade**: swap `playerStore.ts`'s JSON file for Postgres, keeping the same `loadPlayer`/`savePlayer` function signatures. Will also need to decide whether `hp`/`maxHp` become persisted once combat/death exist, whether any room-scoped state beyond NPCs should ever be persisted to disk, and whether `admins.json`/`bans.json` should move to the same store.
-10. **Polish & Scale**: real sprites/tilesets, procedural elements, proper accounts/auth (the login screen's password-field slot is ready for this - would also let admin auth move beyond "trust the username"), configurable external port.
-11. **Reconnection / session-resume**: automatic reconnect-with-backoff after a disconnect, and resuming a dropped session (same identity/position) rather than always requiring a fresh manual login. Natural follow-up to the login-screen/disconnect-handling work in Section 3b.
-12. **Web admin panel** *(new)*: an HTTP layer (e.g. a small authenticated Express route) calling the exact same `commandRegistry.execute()` used by console and chat today - the registry was deliberately designed so this requires no changes to existing commands, just a third `actor`/`reply` pairing.
-13. **More admin commands** *(new)*: natural next additions following the same registration pattern - `/spawn`, `/teleport`, `/setlevel`, `/mute`, `/broadcast`.
+9. **Persistence upgrade**: swap `playerStore.ts`'s JSON file for Postgres. Decide whether `hp`/`maxHp` and a *stable* (not per-session-regenerated) `player.id` get persisted once real accounts exist.
+10. **Polish & Scale**: real sprites/tilesets, procedural elements, proper accounts/auth, configurable external port.
+11. **Reconnection / session-resume**: automatic reconnect-with-backoff and session-resume.
+12. **Web admin panel**: an HTTP layer calling the same `commandRegistry.execute()` used by console and chat today.
+13. **More admin commands**: `/spawn`, `/teleport`, `/setlevel`, `/mute`, `/broadcast`.
+14. **Synced ECS components** *(new)*: split `Position`/`Health`/`TargetRef`-equivalent fields from `Player`/`Npc` into real nested Colyseus sub-schemas, so systems (especially the eventual `CombatSystem`) can operate generically across "anything with health" rather than being written against `Player`/`Npc` by name.
 
 Each phase should update this SPEC with detailed mechanics once implemented.
 
 ## 7. UI/UX & Graphics
-- Style: simple 2D top-down. Green/gray tile palette. Distinct player colors (blue = local player, red = remote players); NPCs red (hostile) or a reserved neutral color (future friendly NPCs). Login screen uses a simple dark card/overlay style consistent with the in-game HUD's translucent-dark aesthetic.
-- Controls: keyboard + mouse for MVP. Touch not yet implemented.
-- Layout: canvas fills the game area; login screen overlays everything until connected; top-left HUD; top-right target frame; bottom-left chat log + input; toast notifications appear top-center, auto-dismiss.
-- Graphics MVP: no external assets - Phaser `Graphics`/shape primitives and text only (the login screen is plain HTML/CSS, no canvas involvement).
+Unchanged this version - see earlier SPEC revisions.
 
 ## 8. Non-Functional Requirements
-- **Performance:** 60 FPS client target. Server simulation tick at 20Hz. Local player movement is client-predicted at full render framerate (not tied to the server's 20Hz tick) for responsiveness, while remaining fully corrected against server truth. NPC-vs-player collision, and TAB-cycle target-candidate gathering, are currently O(n) per player per tick/keypress - acceptable at current scale, flagged for revisit if that grows substantially.
-- **Security:** All critical actions (movement, chat, targeting, admin commands) validated/sanitized server-side. Client-side movement prediction is purely a rendering/feel technique - the server never trusts client-reported positions. Chat has basic rate limiting and HTML-tag stripping. Target requests are validated against actual room state before being committed. Login remains username-only (no password/auth) for MVP - the login screen's markup has an unused password-field slot reserved for when that's added. **Admin trust model (new, v0.7):** admin status is purely username-based (`admins.json`/`ADMIN_USERNAMES`), with no password layer of its own - it inherits the same "no real auth yet" trust model as login in general. This is an accepted MVP trade-off appropriate for a friends-only self-hosted server, explicitly flagged for revisit once real accounts/auth exist (Roadmap #10).
-- **Known accepted vulnerability trade-off:** the server depends on `@colyseus/core` in the 0.15.x line, which carries a moderate `nanoid` advisory. Fixing it requires upgrading to Colyseus 0.17 - a deliberate future migration, not a drive-by fix.
-- **Known accepted architecture trade-off:** movement/collision math is duplicated in *three* places conceptually kept in sync - `server/src/rooms/OverworldRoom.ts` (authoritative), `client/src/network/predictedMovement.ts` (client prediction), and the tile data itself in both `mapData.ts` copies. All three must move together if `MOVE_SPEED`, the tick rate, or the collision box ever change, or client prediction will silently start drifting more than expected.
-- **Reliability:** The shared overworld room is persistent for the lifetime of the server process (`autoDispose = false`) - it and its NPCs survive every client disconnecting, rather than being torn down and recreated empty. Client-side, a dropped connection (`room.onLeave`) is handled gracefully: local state/visuals are torn down and the player is returned to the login screen to log back in, rather than being left on a frozen/broken scene. There is still no *automatic* reconnect-with-backoff, and no session-resume (rejoining mid-session with prior position/state) - both require a manual fresh login (see Roadmap). Player data (level/xp/stats) continues to be saved on disconnect and loaded on join, unaffected by any of this. `/quit` (new, v0.7) provides a clean, broadcast-warned shutdown path as an alternative to killing the process outright.
-- **Extensibility:** Loose coupling between networking (Colyseus) and game logic (map, chat, NPC, targeting, persistence, prediction, login/session, and now admin command modules). Easy to add new event handlers, entity types, and systems without touching the room's core loop structure. The admin command registry specifically was designed so new commands, and even entirely new entry points (a future web panel), require no changes to existing code (see Section 3c).
-- **Testing:** Manual multi-tab/browser testing, including Chrome DevTools network throttling (added latency) to verify prediction/reconciliation feels smooth under lag, manually killing/restarting the server process to verify the login screen's disconnect/reconnect flow, and manually exercising admin commands from both the server console and admin chat sessions (see README.md). No automated tests yet.
+- **Performance:** Unchanged (60 FPS client target, 20Hz server tick). NPC-vs-player collision and TAB-cycle candidate gathering remain O(n) per tick/keypress, still acceptable at current scale.
+- **Security:** Unchanged - all critical actions validated/sanitized server-side; movement prediction is a client-feel technique only.
+- **Known accepted vulnerability trade-off:** `@colyseus/core` 0.15.x still carries a moderate `nanoid` advisory (unchanged, pending a future 0.17 migration).
+- **Known accepted architecture trade-off:** movement/collision math remains duplicated in three conceptually-linked places - `MovementSystem.ts` (authoritative), `client/src/network/predictedMovement.ts` (client prediction), and the tile data itself in both `mapData.ts` copies. Relocating the authoritative copy into `MovementSystem.ts` during the ECS migration did not change this trade-off's shape, only where the "server" side of it lives.
+- **`ignoreDeprecations` note** *(new)*: `server/tsconfig.json` sets `"ignoreDeprecations": "5.0"` to silence a `TS5107` deprecation warning (`moduleResolution: node10`) that a locally-installed TypeScript 5.9.3 escalates to a hard build error. This value is specific to what 5.9.x's compiler actually validates (its own emitted guidance pointing at `"6.0"` turned out not to be accepted by that version) and will need revisiting - likely via an actual migration to `moduleResolution: nodenext`, not just a new suppression value - whenever TypeScript is next upgraded past 6.0. Flagged here so it isn't rediscovered as a surprise.
+- **Reliability:** Unchanged - persistent overworld room, graceful disconnect handling, `/quit` for clean shutdown.
+- **Extensibility:** Significantly improved this version - see Section 3a. New game logic is now, in the common case, a new system file plus a data file entry, rather than a growing `OverworldRoom`.
+- **Testing:** Manual multi-tab/browser testing (unchanged), plus this version's ECS migration was verified in four independently-tested phases rather than as one large change - each phase confirmed to behave identically (or, for the NPC spawn redesign, exactly as intended) before moving to the next. No automated tests yet.
 
 ## 9. Coding Standards & Conventions
 - Modern TypeScript everywhere (`const`/`let`, arrow functions, async/await, classes/modules, strict mode).
-- Clear, abundant comments, especially for networking, collision, and anything with a non-obvious "why" (e.g., the `@colyseus/core` vs `colyseus` meta-package choice, the server/client map-data duplication, why NPC targeting fields are unsynced, why prediction reconciliation blends through `serverX/Y` instead of snapping `predictedX/Y` directly, why `autoDispose` must be assigned in `onCreate()` rather than declared as a class field, why the admin module avoids importing `OverworldRoom` directly).
-- Descriptive variable/event names; message/event names (`"move"`, `"chat"`, `"chat-message"`, `"level-up"`, `"npc-contact"`, `"set-target"`, `"move-ack"`, `"command-reply"`, `"server-shutdown"`) are treated as a small informal protocol - keep client and server in sync when changing them.
-- Version pinning: prefer loose caret ranges (`^0.15.0`) over exact patch pins for fast-moving dependencies like Colyseus packages.
-- **Why `@colyseus/core` instead of `colyseus`:** avoids an unnecessary and vulnerable dependency chain (`grant` → `request-oauth` → `jwk-to-pem`/`uuid` → `elliptic`) pulled in by the meta-package's unused auth/Redis dependencies.
-- **`autoDispose` gotcha:** it's a getter/setter accessor on the base Colyseus `Room` class, not a plain field - declaring `autoDispose = false` as a class property conflicts with that accessor and fails to compile (TS2610). Assign it via `this.autoDispose = false` inside a method (e.g. the top of `onCreate()`) instead.
-- **Admin module import direction (new, v0.7):** `server/src/admin/*` never imports `OverworldRoom` directly - it depends only on a small structural interface (`AdminRoomApi` in `admin/types.ts`) that `OverworldRoom` happens to satisfy. `OverworldRoom` imports *from* the admin module (registry, auth, ban list, runtime registration), not the other way around, avoiding an import cycle.
-- Error handling on both client and server for network/message boundaries, including a try/catch around the client's room-join attempt so a failed connection surfaces as a login-screen error rather than an unhandled rejection, and a try/catch around every admin command's execution so one broken command can't crash the room or hang the console/chat caller.
-- Git commits: atomic, clear messages (e.g., `feat: add login screen and disconnect handling`, `fix: keep overworld room alive with zero clients connected`, `feat: add server-authoritative admin command system`).
+- Clear, abundant comments, especially for networking, collision, and anything with a non-obvious "why."
+- Descriptive variable/event names; message/event names are treated as a small informal protocol.
+- Version pinning: prefer loose caret ranges (`^0.15.0`) for fast-moving dependencies, but pin tightly (e.g. `uuid@^11`, staying below a known breaking major) when a specific major-version boundary is known to break something (CommonJS support, in `uuid`'s case).
+- **ECS conventions (new, v0.8):**
+  - Every piece of gameplay logic lives in its own file under `ecs/systems/`, one responsibility each.
+  - Tick-based systems implement `ecs/World.ts`'s `System` interface (`update(world, dtSeconds)`) and are registered with `World.registerSystem()`. Reactive or interval-driven systems (the majority so far) are plain classes constructed once in `OverworldRoom.onCreate()` and called into directly from wherever their trigger actually occurs - forcing every system through one uniform tick interface was judged to add no value for logic that isn't naturally tick-driven.
+  - Systems that need to broadcast to clients take a `broadcast` callback via constructor injection rather than importing Colyseus's `Room` type directly - keeps systems testable in isolation and avoids a dependency on the room implementation.
+  - **No hardcoded data in logic files.** Every tunable number or content definition (map data, NPC templates/spawn points, character defaults, leveling curve, gameplay tuning) lives in `server/src/data/`, imported by whichever system(s) need it.
+- **`@colyseus/core` vs `colyseus`, `autoDispose`, admin import direction:** unchanged from earlier SPEC revisions - see those sections for the "why."
+- **UUID v7 / sessionId distinction (new, v0.8):** `player.id` (UUID v7) and the Colyseus `client.sessionId` used as the `state.players` MapSchema key are deliberately different strings after this version's migration - any new code that needs to reach a live WebSocket client (kick/ban/kill-style operations) must use `sessionId`, never `player.id`. `Npc.id`, by contrast, IS its MapSchema key (no split needed, since NPCs aren't tied to a live connection).
+- Error handling on both client and server for network/message boundaries, unchanged.
+- Git commits: atomic, clear messages (e.g., `feat: migrate movement to MovementSystem (ECS Phase 2)`, `fix: rekey npcContactCooldown by sessionId not player.id`, `refactor: NPC spawning uses fixed spawn points instead of random tiles`).
 
 ## 10. Known Issues / Technical Debt / TODOs
-- [ ] Server/client tile-map duplication (`mapData.ts` in both packages), joined by movement/collision math duplication (`predictedMovement.ts` vs `OverworldRoom.ts`) - should become a single shared source once maps stop being trivial/hardcoded.
-- [ ] NPC collision is not predicted client-side - bumping an NPC may show a brief visual correction. Fine while NPCs are static; revisit alongside NPC AI (Roadmap #2).
-- [ ] NPC-vs-player collision, and TAB-cycle target-candidate gathering, are O(n) per tick/keypress; fine now, revisit if NPC/player counts grow.
-- [ ] No automatic reconnection/session-resume logic - a dropped connection returns the player gracefully to the login screen, but always requires a manual fresh login rather than auto-retrying or resuming the prior session (see Roadmap).
+- [ ] Server/client tile-map duplication, joined by movement/collision math duplication (`MovementSystem.ts` vs `predictedMovement.ts`) - should become a single shared source once maps stop being trivial/hardcoded.
+- [ ] NPC collision is not predicted client-side.
+- [ ] NPC-vs-player collision, and TAB-cycle target-candidate gathering, are O(n) per tick/keypress.
+- [ ] No automatic reconnection/session-resume logic.
 - [ ] External port isn't configurable independent of the server's internal port.
-- [ ] Residual moderate `nanoid` advisory in `@colyseus/core` ≤0.16.24 accepted as a trade-off until the Colyseus 0.17 migration.
-- [ ] Deployment checklist/environment variables beyond `PORT`/`ADMIN_USERNAMES` not yet formalized.
-- [ ] `hp`/`maxHp` are not yet persisted - needs a decision once damage/death/respawn exist (also relevant to `/kill`'s current "zero hp and disconnect" behavior).
+- [ ] Residual moderate `nanoid` advisory in `@colyseus/core` ≤0.16.24.
+- [ ] `hp`/`maxHp` are not yet persisted.
 - [ ] The client build (`client/dist`) is not automatically rebuilt/watched by the server process.
-- [ ] Prediction correction tuning (`CORRECTION_RATE`, dead-zone threshold, `SNAP_THRESHOLD`) is based on local/low-latency testing so far - worth revisiting once tested over a real internet connection with friends, not just localhost/DevTools throttling.
-- [ ] The NPC spawner and passive-XP timers keep running even with zero clients connected, since the overworld room no longer disposes itself when empty. Harmless today given the existing mob population cap and XP simply having no player to apply to, but worth remembering if either interval ever does something more expensive.
-- [ ] No password/auth yet - the login screen's password-field slot exists in the markup but is hidden and unused.
-- [ ] **(new, v0.7)** Admin `command-reply` and `server-shutdown` client messages aren't rendered in the game UI yet - visible today only via the browser dev console. Small follow-up to wire into the existing chat log/toast system.
-- [ ] **(new, v0.7)** A banned username's failed login shows the same generic connection-error copy as any other join failure - the specific ban reason from `onAuth` isn't yet surfaced distinctly in the login screen.
-- [ ] **(new, v0.7)** Admin permission is username-only with no password layer - acceptable for a friends-only server today, but should be revisited once real accounts/auth exist (Roadmap #10).
-- [ ] **(new, v0.7)** `admins.json`/`bans.json` are read from disk on every check (no caching) - fine at current call frequency, same trade-off already accepted for `players.json`.
+- [ ] Prediction correction tuning is based on local/low-latency testing so far.
+- [ ] No password/auth yet.
+- [ ] Admin `command-reply` and `server-shutdown` client messages aren't rendered in the game UI yet.
+- [ ] A banned username's failed login shows generic connection-error copy, not a specific ban message.
+- [ ] Admin permission is username-only with no password layer.
+- [ ] `admins.json`/`bans.json` are read from disk on every check (no caching).
+- [ ] **(new, v0.8)** `player.id` is regenerated fresh on every join, same ephemerality as `sessionId` - not yet a truly stable per-account identity, since no persisted per-account id exists in `players.json` yet. Revisit alongside Roadmap #10/#9.
+- [ ] **(new, v0.8)** NPC spawning is still a single global wall-clock interval re-checking every spawn point, and isn't triggered by zone entry (there's only one zone) - both explicitly deferred until zones/maps exist (Roadmap #3).
+- [ ] **(new, v0.8)** Synced Colyseus components (`Position`/`Health`/`TargetRef`-equivalents) are not yet split into real nested sub-schemas - `Player`/`Npc` remain flat field lists (Roadmap #14).
+- [ ] **(new, v0.8)** `server/tsconfig.json`'s `"ignoreDeprecations": "5.0"` is a stopgap for a TypeScript 5.9.3-specific quirk (Section 8) and will need real attention (likely a `moduleResolution` migration) on the next TypeScript upgrade past 6.0.
+- [x] **(resolved, v0.8)** `server/node_modules`, `server/dist`, `client/node_modules`, `client/dist`, and `server/data/*.json` were previously committed to git by accident (no `.gitignore` existed) - a `.gitignore` now exists and `git rm --cached` was used to untrack them.
 
 ## 11. Changelog
-- **2026-07-10 (v0.7):** Added a server-authoritative Admin Command System. New `server/src/admin/` module: a `CommandRegistry` (name → handler) shared by two entry points - an interactive server console prompt (Node `readline`, always treated as admin) and in-game chat (`/`-prefixed messages, intercepted before normal chat sanitization/rate-limiting). Built-in commands: `/help`, `/who`, `/quit` (graceful shutdown with a broadcast warning), `/ban`/`/unban` (persisted to new `server/data/bans.json`, enforced via a new `OverworldRoom.onAuth()` that rejects banned usernames before a `Player` is ever created), `/kick`, `/kill` (removes NPCs; zeroes HP and disconnects players, pending a real death system), and `/givexp` (reuses passive XP's level-up logic, now extracted into a shared `OverworldRoom.grantXp()` method and a standalone `xpForNextLevel()` util). Admin status (new `server/data/admins.json` + `ADMIN_USERNAMES` env var) and bans are deliberately server-only, not part of any synced Schema. The admin module never imports `OverworldRoom` directly (depends only on a small structural `AdminRoomApi` interface) to avoid an import cycle, since `OverworldRoom` itself imports from the admin module. Designed so both new commands and entirely new entry points (a future web admin panel) require no changes to existing code - see SPEC.md Section 3c.
-- **2026-07-10 (v0.6):** Added a proper login screen (HTML/CSS overlay, `client/src/ui/LoginScreen.ts`) replacing the old blocking `window.prompt()` - collects a username (with an unused password-field slot reserved for future auth) and only reveals the game once a room join succeeds; a failed join shows an inline retry-able error instead of hanging. Added graceful disconnect handling: `room.onLeave` on the client now tears down all local game state/visuals and returns the player to the login screen with a status message, instead of leaving a frozen scene. Fixed keyboard capture so typing (including W/A/S/D) works normally in both the login username field and chat, by stopping those inputs' keydown events from reaching Phaser's global movement-key bindings. **Separately, fixed a server-side bug** where the shared `OverworldRoom` (and everything in it, including spawned NPCs) was being destroyed and silently recreated empty every time the last connected client disconnected, because Colyseus rooms default to `autoDispose = true`. Set `this.autoDispose = false` (assigned in `onCreate()`, since `autoDispose` is a getter/setter accessor on the base `Room` class and can't be overridden as a plain class field - doing so fails to compile with TS2610) so the overworld - and its simulation/spawn/XP intervals - now persists for the lifetime of the server process, independent of client connections. No new client-server protocol messages were needed for any of this.
-- **2026-07-10 (v0.5):** Added client-side movement prediction with server reconciliation. Local player movement is now predicted instantly client-side (new `client/src/network/predictedMovement.ts`, mirroring server movement/collision math) instead of waiting on server round-trips, fixing "laggy/cumbersome" feel even on fast connections. `"move"` messages now carry a sequence number; server unicasts a new `"move-ack"` message with its confirmed position. Client replays any locally-predicted-but-not-yet-confirmed steps on top of that, then blends smoothly toward the result (not an instant snap) to avoid visible "pop"/skip when stopping or changing direction, and to absorb minor wall-collision discretization drift. Remote players and NPCs are unaffected - still interpolated as before. NPC collision remains unpredicted client-side (accepted trade-off, flagged for revisit with NPC AI). Movement/collision math is now duplicated in three conceptually-linked places (server, client prediction, tile data) that must be kept in sync together.
-- **2026-07-10 (v0.4):** Added Targeting System. `Player` schema gains `hp`/`maxHp` (groundwork for Combat MVP) and synced `targetId`/`targetType`; `Npc` schema gains `targetId`/`targetType` as well, but intentionally unsynced. New server-validated `set-target` message lets clients request a target (click on a player/NPC, or TAB to cycle nearest-first through visible entities) or clear it. New client module `TargetFrame.ts` renders the target's name/level/HP bar. **Architecture change:** dev workflow is now single-process - the Express server serves the built client on the same port as the Colyseus WebSocket transport in *both* dev and production.
-- **2026-07-09 (v0.3):** Added global chat system (sanitization, rate limiting, HTML overlay UI). Added hostile NPC system (Schema, spawner, collision, contact notification). Added `stats` map to `Player` schema. Switched server dependency from `colyseus` meta-package to `@colyseus/core` directly. Bumped `vite` to `^8.0.0`. Added single-port production deployment. Project officially renamed from working title "EchoRealm" to **VibeRealm**.
-- **2026-07-06 (v0.1):** Initial SPEC created. Defined MVP scope and architecture; initial scaffold implemented server-authoritative movement, tile collision, passive leveling, and Colyseus Schema sync.
+- **2026-07-15 (v0.8):** Two major, previously-undocumented pieces of work landed in this version:
+  1. **UUID v7 entity identity migration** (done prior to this SPEC update, documented here for the first time): `Player.id`/`Npc.id` now use UUID v7 (`server/src/utils/generateId.ts`, `uuid@^11`) instead of ad-hoc schemes (a copy of `client.sessionId` for players; a sequential counter for NPCs). `state.players` remains keyed by `client.sessionId`, NOT `player.id` - the two are now deliberately different strings. This surfaced and fixed two related bugs: `npcContactCooldown` was keyed by `player.id` but cleaned up by `sessionId` (a silent per-disconnect memory leak), and the `npc-contact`/`level-up` broadcasts' `sessionId` fields had the same mismatch (breaking the "bumped into" toast entirely, since the client compares that field against its own session id). Admin lookup (`entityLookup.ts`) now returns `{ player, sessionId }` so `/ban`/`/kick`/`/kill` correctly resolve the live connection.
+  2. **Lightweight ECS migration**, done in four incrementally-tested phases: (1) a `server/src/data/` static data layer (map, NPC templates, character defaults, leveling/gameplay tuning) extracted from previously-hardcoded values, plus `ecs/` scaffolding (`World`, component-store pattern); (2) movement/collision → `MovementSystem`, verified byte-for-byte identical to the pre-migration logic since client-side prediction mirrors it independently; (3) NPC spawning/contact → `NpcSpawnSystem`/`NpcContactSystem`, with a mid-phase redesign replacing "spawn anywhere randomly on a timer, capped at 15" with fixed designated spawn points (`data/npcSpawnPoints.ts`, 8 points, one NPC per point, population emergent from point count) - the old mechanic was only ever a testing convenience and was never meant to represent the finished per-zone spawning design; (4) targeting/leveling → `TargetingSystem`/`LevelingSystem`. `OverworldRoom` is now a thin adapter: Colyseus lifecycle/message wiring plus a couple of compatibility wrappers (`grantXp()`) for the admin module, which still doesn't need to know any ECS systems exist.
+  Also this version: added a proper `.gitignore` (previously absent) and untracked `node_modules`/`dist`/`server/data/*.json`, which had been committed by accident; pinned `server/tsconfig.json`'s `ignoreDeprecations` to `"5.0"` (the value actually accepted by the installed TypeScript 5.9.3, despite that compiler's own error text pointing at `"6.0"`) to resolve a `moduleResolution: node10` deprecation warning escalating to a build-blocking error.
+- **2026-07-10 (v0.7):** Added a server-authoritative Admin Command System. New `server/src/admin/` module: a `CommandRegistry` shared by an interactive server console and in-game `/`-prefixed chat. Built-in commands: `/help`, `/who`, `/quit`, `/ban`/`/unban`, `/kick`, `/kill`, `/givexp`.
+- **2026-07-10 (v0.6):** Added a proper login screen replacing the old blocking `window.prompt()`, graceful disconnect handling, and fixed the shared `OverworldRoom` being destroyed/recreated empty on last-client-leave (`autoDispose = false`).
+- **2026-07-10 (v0.5):** Added client-side movement prediction with server reconciliation.
+- **2026-07-10 (v0.4):** Added Targeting System.
+- **2026-07-09 (v0.3):** Added global chat system, hostile NPC system, `stats` map on `Player`. Switched to `@colyseus/core` direct import. Project renamed from "EchoRealm" to **VibeRealm**.
+- **2026-07-06 (v0.1):** Initial SPEC created.
 
 ## Appendix
-- **References:** Colyseus docs (rooms, Schema, `getStateCallbacks` for 0.17+, `autoDispose`, `onAuth`), Phaser 3 docs, Vite docs, Node `readline` docs.
-- **Deployment notes:** Single-port model, used for both dev and production - build the client (`npm run build` in `client/`), run the server (`npm run dev` or `npm run build && npm start` in `server/`), forward TCP port 2567 on the router for friends. Set `ADMIN_USERNAMES` (or edit `server/data/admins.json`) before running if you want in-game admin commands available.
-- **Testing notes:** Chrome DevTools → Network conditions → custom throttling with added latency is a useful way to verify prediction/reconciliation feels smooth under simulated lag, even when developing on localhost. To verify the login/disconnect flow, kill the server process mid-session and confirm the client returns to the login screen; restart the server and confirm previously-spawned NPCs are still present after logging back in (persistent-room fix, v0.6). To verify admin commands, run `/who`, `/givexp`, `/ban`+rejoin-attempt, and `/quit` from both the server console and an admin chat session (see README.md).
-- **Next steps reminder:** Use this SPEC in all Claude prompts for context. Update it after each major feature or architectural decision - this version was rewritten after the admin command system shipped, to keep it from drifting out of sync with the implementation again.
+- **References:** Colyseus docs (rooms, Schema, `autoDispose`, `onAuth`), Phaser 3 docs, Vite docs, Node `readline` docs, `uuid` package docs (v7 support, CommonJS-vs-ESM breaking change at v12), TypeScript deprecation/migration docs (`moduleResolution: node10`/`nodenext`, `ignoreDeprecations`).
+- **Deployment notes:** Unchanged - single-port model for both dev and production; forward TCP port 2567 on the router for friends; set `ADMIN_USERNAMES` (or edit `server/data/admins.json`) before running if you want in-game admin commands available.
+- **Testing notes:** In addition to earlier testing guidance (DevTools latency throttling, kill/restart-server disconnect flow, `/who`/`/givexp`/`/ban`/`/quit` from both console and chat) - this version's ECS migration was verified phase-by-phase: movement/collision feel and wall-sliding behavior unchanged after Phase 2; spawn-point occupancy behavior (exactly one NPC per point, refilling a vacated point rather than spawning anywhere) after Phase 3; targeting/leveling round-trips (including `/givexp`'s full chain through the admin wrapper into `LevelingSystem`) after Phase 4.
+- **Next steps reminder:** Use this SPEC in all Claude prompts for context. Update it after each major feature or architectural decision - this version was rewritten after the ECS migration and UUID v7 documentation gap were both closed, to keep it from drifting out of sync with the implementation again.

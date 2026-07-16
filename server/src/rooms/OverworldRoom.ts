@@ -1,12 +1,9 @@
 import { Room, Client } from "@colyseus/core";
 import { OverworldState } from "./schema/OverworldState";
 import { Player } from "./schema/Player";
-import { Npc } from "./schema/Npc";
 import { TILE_SIZE, MAP_WIDTH, MAP_HEIGHT } from "../data/mapData";
 import { loadPlayer, savePlayer } from "../persistence/playerStore";
 import { sanitizeMessage, ChatRateLimiter } from "../chat/chatModeration";
-import { createHostileMob, findRandomWalkableSpawn } from "../npc/npcFactory";
-import { xpForNextLevel } from "../util/leveling";
 import { commandRegistry } from "../admin/commandRegistry";
 import { isAdmin } from "../admin/adminAuth";
 import { isBanned } from "../admin/banList";
@@ -17,15 +14,14 @@ import { LEVELING_CONFIG } from "../data/levelingConfig";
 import { DEFAULT_CHARACTER_TEMPLATE } from "../data/characterTemplates";
 import { World } from "../ecs/World";
 import { MovementSystem } from "../ecs/systems/MovementSystem";
+import { NpcSpawnSystem } from "../ecs/systems/NpcSpawnSystem";
+import { NpcContactSystem } from "../ecs/systems/NpcContactSystem";
+import { TargetingSystem, TargetType } from "../ecs/systems/TargetingSystem";
+import { LevelingSystem } from "../ecs/systems/LevelingSystem";
 
 const SIMULATION_TICK_MS = GAMEPLAY_CONFIG.simulationTickMs;
 const XP_TICK_MS = LEVELING_CONFIG.passiveXpIntervalMs;
-const XP_PER_TICK = LEVELING_CONFIG.passiveXpAmount;
-const NPC_SPAWN_INTERVAL_MS = GAMEPLAY_CONFIG.npcSpawnIntervalMs;
-const MAX_HOSTILE_MOBS = GAMEPLAY_CONFIG.maxHostileMobs;
-const NPC_CONTACT_COOLDOWN_MS = GAMEPLAY_CONFIG.npcContactCooldownMs;
-
-type TargetType = "player" | "npc";
+const NPC_SPAWN_CHECK_INTERVAL_MS = GAMEPLAY_CONFIG.npcSpawnCheckIntervalMs;
 
 /**
  * Single shared overworld room. Server-authoritative movement + collision,
@@ -34,28 +30,28 @@ type TargetType = "player" | "npc";
  * the server console and in-game "/"-prefixed chat route into the same
  * shared CommandRegistry (see server/src/admin/).
  *
- * ECS migration status (Phase 2): movement/collision now lives in
- * ecs/systems/MovementSystem.ts, run each tick via `this.world.update()`.
- * NPC contact's cooldown+broadcast, targeting, and leveling are still
- * directly on this class - later phases migrate those too. See
- * ecs/World.ts for the scaffolding this phase started using.
+ * ECS migration status (Phase 4): targeting and leveling now live in
+ * ecs/systems/TargetingSystem.ts and ecs/systems/LevelingSystem.ts,
+ * alongside Phase 2's MovementSystem and Phase 3's NpcSpawnSystem/
+ * NpcContactSystem. This class is now a thin adapter: message wiring,
+ * lifecycle (onAuth/onJoin/onLeave/onDispose), and a couple of small
+ * public wrappers (grantXp) kept specifically so the admin module
+ * doesn't need to know any ECS systems exist - see LevelingSystem.ts's
+ * doc comment.
  */
 export class OverworldRoom extends Room<OverworldState> {
   maxClients = 100;
 
   private chatRateLimiter = new ChatRateLimiter();
-  // Keyed by Colyseus client.sessionId (NOT player.id) - must match the
-  // key used in onLeave()'s cleanup below, or entries leak forever after
-  // a player disconnects. See handleNpcContact() for why this is threaded
-  // through explicitly rather than read off `player.id` (which, since the
-  // UUID v7 migration, is no longer the same string as the session id).
-  private npcContactCooldown = new Map<string, number>();
 
-  // ECS world - owns the systems that run each simulation tick. Assigned
-  // in onCreate() (needs `this.state` to already exist), hence the
-  // definite-assignment assertion, same pattern Colyseus's own `state`
-  // field uses.
+  // ECS world + systems - all assigned in onCreate() (need `this.state`/
+  // `this.world` to already exist), hence the definite-assignment
+  // assertions, same pattern Colyseus's own `state` field uses.
   private world!: World;
+  private npcSpawnSystem!: NpcSpawnSystem;
+  private npcContactSystem!: NpcContactSystem;
+  private targetingSystem!: TargetingSystem;
+  private levelingSystem!: LevelingSystem;
 
   onCreate() {
     // VibeRealm has exactly one persistent shared overworld, not disposable
@@ -65,17 +61,29 @@ export class OverworldRoom extends Room<OverworldState> {
     this.setState(new OverworldState());
 
     this.world = new World(this.state);
-    // MovementSystem still reports NPC bumps back through this room's own
-    // handleNpcContact() (cooldown + broadcast) rather than owning that
-    // itself - see MovementSystem.ts's doc comment and Phase 3's planned
-    // NpcContactSystem, which will replace this callback wiring.
+    this.npcSpawnSystem = new NpcSpawnSystem(this.world);
+    this.targetingSystem = new TargetingSystem(this.world);
+    // Both bound to this room's own broadcast() so neither system needs
+    // to import or know about Colyseus's Room type directly.
+    this.npcContactSystem = new NpcContactSystem(this.world, (type, message) =>
+      this.broadcast(type, message)
+    );
+    this.levelingSystem = new LevelingSystem(this.world, (type, message) =>
+      this.broadcast(type, message)
+    );
+
+    // MovementSystem reports NPC bumps via this callback into
+    // NpcContactSystem, rather than owning cooldown/broadcast logic
+    // itself - see MovementSystem.ts's doc comment.
     this.world.registerSystem(
-      new MovementSystem((player, npc, sessionId) => this.handleNpcContact(player, npc, sessionId))
+      new MovementSystem((player, npc, sessionId) =>
+        this.npcContactSystem.handleContact(player, npc, sessionId)
+      )
     );
 
     this.setSimulationInterval((deltaTime) => this.world.update(deltaTime / 1000), SIMULATION_TICK_MS);
-    this.clock.setInterval(() => this.grantPassiveXp(), XP_TICK_MS);
-    this.clock.setInterval(() => this.spawnRandomHostileMob(), NPC_SPAWN_INTERVAL_MS);
+    this.clock.setInterval(() => this.levelingSystem.grantPassiveTick(), XP_TICK_MS);
+    this.clock.setInterval(() => this.npcSpawnSystem.tick(), NPC_SPAWN_CHECK_INTERVAL_MS);
 
     this.onMessage(
       "move",
@@ -101,7 +109,7 @@ export class OverworldRoom extends Room<OverworldState> {
       (client, payload: { targetId?: string | null; targetType?: TargetType | null }) => {
         const player = this.state.players.get(client.sessionId);
         if (!player) return;
-        this.setPlayerTarget(player, payload?.targetId ?? null, payload?.targetType ?? null);
+        this.targetingSystem.setTarget(player, payload?.targetId ?? null, payload?.targetType ?? null);
       }
     );
 
@@ -181,7 +189,7 @@ export class OverworldRoom extends Room<OverworldState> {
       });
       this.state.players.delete(client.sessionId);
       this.chatRateLimiter.remove(client.sessionId);
-      this.npcContactCooldown.delete(client.sessionId);
+      this.npcContactSystem.clearFor(client.sessionId);
 
       this.state.players.forEach((otherPlayer) => {
         if (otherPlayer.targetType === "player" && otherPlayer.targetId === client.sessionId) {
@@ -198,69 +206,11 @@ export class OverworldRoom extends Room<OverworldState> {
     setActiveRoom(null);
   }
 
+  // Thin public wrapper, kept specifically so admin/types.ts's
+  // AdminRoomApi interface (and therefore admin/commands.ts's /givexp)
+  // can keep calling `room.grantXp(...)` directly, without the admin
+  // module needing to import or know that LevelingSystem exists.
   grantXp(player: Player, amount: number, sessionId: string) {
-    player.xp += amount;
-    while (player.xp >= xpForNextLevel(player.level)) {
-      player.xp -= xpForNextLevel(player.level);
-      player.level += 1;
-      this.broadcast("level-up", {
-        sessionId,
-        username: player.username,
-        level: player.level,
-      });
-    }
-  }
-
-  private setPlayerTarget(
-    player: Player,
-    targetId: string | null,
-    targetType: TargetType | null
-  ): boolean {
-    if (!targetId || !targetType) {
-      player.targetId = "";
-      player.targetType = "";
-      return true;
-    }
-
-    if (targetType === "player") {
-      if (!this.state.players.has(targetId)) return false;
-    } else if (targetType === "npc") {
-      if (!this.state.npcs.has(targetId)) return false;
-    } else {
-      return false;
-    }
-
-    player.targetId = targetId;
-    player.targetType = targetType;
-    return true;
-  }
-
-  private handleNpcContact(player: Player, npc: Npc, sessionId: string) {
-    const now = Date.now();
-    const last = this.npcContactCooldown.get(sessionId) ?? 0;
-    if (now - last < NPC_CONTACT_COOLDOWN_MS) return;
-    this.npcContactCooldown.set(sessionId, now);
-
-    this.broadcast("npc-contact", {
-      sessionId,
-      npcId: npc.id,
-      npcName: npc.name,
-      isHostile: npc.isHostile,
-    });
-  }
-
-  private spawnRandomHostileMob() {
-    if (this.state.npcs.size >= MAX_HOSTILE_MOBS) return;
-
-    const spawnPoint = findRandomWalkableSpawn();
-    if (!spawnPoint) return;
-
-    const npc = createHostileMob(spawnPoint.x, spawnPoint.y);
-    this.state.npcs.set(npc.id, npc);
-    console.log(`[npc] spawned ${npc.name} (${npc.id}) at (${spawnPoint.x}, ${spawnPoint.y})`);
-  }
-
-  private grantPassiveXp() {
-    this.state.players.forEach((player, sessionId) => this.grantXp(player, XP_PER_TICK, sessionId));
+    this.levelingSystem.grantXp(player, amount, sessionId);
   }
 }

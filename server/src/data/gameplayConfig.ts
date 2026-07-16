@@ -17,14 +17,19 @@ export const GAMEPLAY_CONFIG = {
   moveSpeed: 120,
   /** Server simulation tick rate, in milliseconds (20Hz). */
   simulationTickMs: 1000 / 20,
-  /** Milliseconds between hostile-mob spawn attempts. */
-  npcSpawnIntervalMs: 10000,
-  /** Population cap so mobs don't grow unbounded. */
-  maxHostileMobs: 15,
+  /**
+   * Milliseconds between checks of every designated NPC spawn point (see
+   * data/npcSpawnPoints.ts + NpcSpawnSystem.ts). Temporary test-harness
+   * cadence - the final game triggers spawning per-zone/per-point, not
+   * on a single global timer.
+   */
+  npcSpawnCheckIntervalMs: 10000,
   /** Multiplied by TILE_SIZE to get the NPC "bump" contact radius. */
   npcContactRadiusRatio: 0.6,
   /** Minimum ms between repeated npc-contact broadcasts for the same player. */
   npcContactCooldownMs: 1000,
   /** Multiplied by TILE_SIZE for the AABB-style corner-check collision box half-width. */
   collisionHalfWidthRatio: 0.35,
+  /** Multiplied by TILE_SIZE - how close an existing NPC must be to a spawn point to count as "occupying" it. */
+  spawnPointOccupancyRadiusRatio: 2,
 };
