@@ -1,26 +1,28 @@
-// server/src/data/npcTemplates.ts
-import { StatName } from "./statDefinitions";
-
 /**
- * NPC/mob definitions. Each template is everything needed to spawn one
- * kind of NPC; npcFactory.ts's createHostileMob() reads from here
- * instead of holding any of these values itself.
+ * NPC/mob definitions - npcFactory.ts's createHostileMob() reads from
+ * here instead of holding any of these values itself.
  *
- * `stats` are Core Stats System base values for this mob type - read by
- * npcFactory.ts into the NPC's StatsComponent at spawn time, then
- * registered with StatsSystem (see NpcSpawnSystem.spawnAt) so future
- * combat/AI can apply modifiers (enrage buffs, debuffs from player
- * skills, etc.) the same way equipment/buffs work for players.
+ * Combat MVP (v0.9): added strength/dexterity/armor (mirrors Player's
+ * stat set, so CombatSystem's damage formula works identically whether
+ * an NPC is the attacker or the defender - not consumed as an attacker
+ * yet since NPCs don't fight back until NPC AI exists, but the data is
+ * ready). Also added xpReward - what CombatSystem grants the killer
+ * on a landed killing blow.
  */
 export interface NpcTemplate {
+  /** Stable lookup key - used by npcFactory.ts, never shown to players. */
   id: string;
+  /** Display-name pool; one is picked at random each time this template spawns. */
   names: string[];
   level: number;
   hp: number;
   maxHp: number;
   isHostile: boolean;
-  stats: Record<StatName, number>;
+  stats: Record<string, number>;
+  /** Matches Npc schema's `behavior` field - "static" until patrol/aggro AI exists. */
   behavior: string;
+  /** XP granted to whoever lands the killing blow (Combat MVP). */
+  xpReward: number;
 }
 
 export const NPC_TEMPLATES: NpcTemplate[] = [
@@ -31,13 +33,8 @@ export const NPC_TEMPLATES: NpcTemplate[] = [
     hp: 20,
     maxHp: 20,
     isHostile: true,
-    stats: {
-      strength: 8,
-      dexterity: 6,
-      willpower: 4,
-      charisma: 2,
-      luck: 5,
-    },
+    stats: { strength: 5, dexterity: 3, armor: 2 },
     behavior: "static",
+    xpReward: 25,
   },
 ];

@@ -1,23 +1,26 @@
-// server/src/persistence/playerStore.ts
 import fs from "fs";
 import path from "path";
 import { DEFAULT_CHARACTER_TEMPLATE } from "../data/characterTemplates";
-import { StatName } from "../data/statDefinitions";
 
 /**
  * Minimal username-based persistence for the MVP: level/xp/stats saved to
  * a JSON file on disconnect, loaded on join. No auth, no passwords.
  *
- * `stats` now holds the Core Stats System's 5 base values (previously
- * just a placeholder `power` field) - saved as a plain Record so old
- * save files missing a stat (or missing `stats` entirely) still load
- * safely via loadPlayer()'s per-stat fallback to character defaults.
+ * Designed to be swapped for Postgres/Redis later without touching callers:
+ * loadPlayer()/savePlayer() are the only two functions the room code calls.
+ *
+ * NOTE: DATA_DIR below (server/data/, one level up from src/) is the
+ * runtime *persistence* folder - unrelated to server/src/data/, the
+ * static game-design data layer. Same word, different job.
+ *
+ * Combat MVP (v0.9): `stats` shape changed from `{ power }` to
+ * `{ strength, dexterity, armor }` - see data/characterTemplates.ts.
  */
 export interface SavedPlayerData {
   username: string;
   level: number;
   xp: number;
-  stats?: Partial<Record<StatName, number>>;
+  stats?: { strength: number; dexterity: number; armor: number };
 }
 
 const DATA_DIR = path.join(__dirname, "..", "..", "data");

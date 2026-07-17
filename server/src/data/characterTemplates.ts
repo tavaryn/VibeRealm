@@ -1,16 +1,15 @@
-// server/src/data/characterTemplates.ts
-import { StatName } from "./statDefinitions";
-
 /**
  * Default stats for a brand-new player - used by playerStore.ts's
  * loadPlayer() fallback (when no saved data exists for a username yet)
  * and by OverworldRoom.onJoin() for the fields playerStore doesn't
- * persist at all yet (hp/maxHp).
+ * persist at all yet (hp/maxHp - see SPEC.md Section 10's "hp/maxHp
+ * aren't persisted" TODO).
  *
- * `stats` are the Core Stats System's base values for a fresh character
- * - flat 10s across the board for MVP (no classes/archetypes yet). Once
- * character creation/classes exist, this is the natural place to branch
- * into per-class starting stat spreads.
+ * Combat MVP (v0.9): the old placeholder "power" stat is replaced with
+ * three real combat stats - strength (unarmed/STR-weapon damage
+ * scaling), dexterity (crit chance scaling, and future DEX-weapon
+ * damage scaling), and armor (damage mitigation - see
+ * data/combatConfig.ts for the full formula).
  */
 export const DEFAULT_CHARACTER_TEMPLATE = {
   level: 1,
@@ -20,8 +19,6 @@ export const DEFAULT_CHARACTER_TEMPLATE = {
   stats: {
     strength: 10,
     dexterity: 10,
-    willpower: 10,
-    charisma: 10,
-    luck: 10,
-  } as Record<StatName, number>,
+    armor: 5,
+  },
 };

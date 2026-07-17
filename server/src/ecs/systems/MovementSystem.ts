@@ -7,19 +7,14 @@ import { GAMEPLAY_CONFIG } from "../../data/gameplayConfig";
 export type NpcContactHandler = (player: Player, npc: Npc, sessionId: string) => void;
 
 /**
- * Server-authoritative movement + wall/NPC collision. Migrated from
- * OverworldRoom's private update()/tryMove()/isPositionWalkable()/
- * findNpcNear() methods (ECS migration Phase 2) - the math itself is
- * completely unchanged, only relocated, so client-side prediction/
- * reconciliation (which mirrors this exact logic in
- * client/src/network/PredictedMovement.ts) keeps working identically.
+ * Server-authoritative movement + wall/NPC collision.
  *
- * NPC "bump" contact notification (cooldown tracking + the actual
- * broadcast) is deliberately NOT this system's job - that's Phase 3's
- * NpcContactSystem. This system only needs to know *whether* an NPC
- * blocked a move, for correct collision - it reports that via the
- * injected `onNpcContact` callback. OverworldRoom currently wires that to
- * its own handleNpcContact() method, unchanged from before this phase.
+ * Combat MVP (v0.9): a downed player (hp <= 0, awaiting CombatSystem's
+ * respawn timer) is skipped entirely - they stay frozen in place until
+ * respawn rather than being able to walk around at 0 hp. OverworldRoom's
+ * "move" message handler also ignores input from a downed player, so
+ * this is defense-in-depth (covers the case where stale input flags were
+ * already set on the Player before they were downed mid-tick).
  */
 export class MovementSystem implements System {
   readonly name = "MovementSystem";
@@ -30,6 +25,8 @@ export class MovementSystem implements System {
     const moveSpeed = GAMEPLAY_CONFIG.moveSpeed;
 
     world.state.players.forEach((player, sessionId) => {
+      if (player.hp <= 0) return; // downed - frozen until CombatSystem respawns them
+
       let dx = 0;
       let dy = 0;
       if (player.inputUp) dy -= 1;

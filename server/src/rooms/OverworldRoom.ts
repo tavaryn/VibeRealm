@@ -21,6 +21,12 @@ import { NpcContactSystem } from "../ecs/systems/NpcContactSystem";
 import { TargetingSystem, TargetType } from "../ecs/systems/TargetingSystem";
 import { LevelingSystem } from "../ecs/systems/LevelingSystem";
 import { StatsSystem } from "../ecs/systems/StatsSystem";
+import { CombatSystem } from "../ecs/systems/CombatSystem";
+import { GameCommandRegistry } from "../ecs/commands/GameCommandRegistry";
+import { commandLog } from "../ecs/commands/CommandLog";
+import { moveIntentCommand } from "../ecs/commands/handlers/moveIntentCommand";
+import { createSetTargetCommand } from "../ecs/commands/handlers/setTargetCommand";
+import { createAttackCommand } from "../ecs/commands/handlers/attackCommand";
 
 const SIMULATION_TICK_MS = GAMEPLAY_CONFIG.simulationTickMs;
 const XP_TICK_MS = LEVELING_CONFIG.passiveXpIntervalMs;
@@ -29,13 +35,20 @@ const NPC_SPAWN_CHECK_INTERVAL_MS = GAMEPLAY_CONFIG.npcSpawnCheckIntervalMs;
 /**
  * Single shared overworld room. Thin ECS adapter - see SPEC.md Section 3a.
  *
- * This version adds the Core Stats System: a `StatsSystem` instance
- * (tick-registered, purely for buff expiry) that every Player and NPC's
- * StatsComponent is registered with on join/spawn, and unregistered from
- * on leave/removal. Three small wrapper methods (addStatModifier/
- * removeStatModifier/getStatModifiers) exist for the same reason
- * grantXp() does - so the admin module can drive stat modifiers without
- * ever importing OverworldRoom or knowing StatsSystem exists.
+ * This version adds the Command Pattern: every player-issued action
+ * ("move", "set-target", "attack", and any future skill/action) is now
+ * dispatched through `gameCommands` (a GameCommandRegistry) instead of
+ * being handled inline in each onMessage callback. OverworldRoom's own
+ * job in each handler shrinks to "hand this off to the registry" -
+ * actor resolution, validation, execution, and logging all now live in
+ * GameCommandRegistry + the individual command handlers under
+ * ecs/commands/. See SPEC.md Section 3a for the ECS architecture this
+ * builds on, and ecs/commands/GameCommandRegistry.ts's doc comment for
+ * why this is a separate registry from admin/commandRegistry.ts.
+ *
+ * Also adds a minimal CombatSystem (melee-only, NPC-only - see that
+ * file's doc comment) as the first real command beyond the pre-existing
+ * move/target actions, to prove the pattern end-to-end.
  */
 export class OverworldRoom extends Room<OverworldState> {
   maxClients = 100;
@@ -48,6 +61,8 @@ export class OverworldRoom extends Room<OverworldState> {
   private targetingSystem!: TargetingSystem;
   private levelingSystem!: LevelingSystem;
   private statsSystem!: StatsSystem;
+  private combatSystem!: CombatSystem;
+  private gameCommands!: GameCommandRegistry;
 
   onCreate() {
     this.autoDispose = false;
@@ -64,6 +79,23 @@ export class OverworldRoom extends Room<OverworldState> {
     this.levelingSystem = new LevelingSystem(this.world, (type, message) =>
       this.broadcast(type, message)
     );
+    this.combatSystem = new CombatSystem(
+      this.world,
+      this.levelingSystem,
+      this.statsSystem,
+      (type, message) => this.broadcast(type, message)
+    );
+
+    // --- Command Pattern wiring ---
+    // Every action a player can take is registered here, once. Adding a
+    // new action later (a skill, an interact-with-object command, etc.)
+    // means: write a new handler file under ecs/commands/handlers/,
+    // register() it here, and add one onMessage(...) line below that
+    // dispatches it - nothing else in this class needs to change.
+    this.gameCommands = new GameCommandRegistry();
+    this.gameCommands.register(moveIntentCommand);
+    this.gameCommands.register(createSetTargetCommand(this.targetingSystem));
+    this.gameCommands.register(createAttackCommand(this.combatSystem));
 
     this.world.registerSystem(
       new MovementSystem((player, npc, sessionId) =>
@@ -75,43 +107,67 @@ export class OverworldRoom extends Room<OverworldState> {
     // never touch this tick path. See StatsSystem.update().
     this.world.registerSystem(this.statsSystem);
 
-    // Cleans up a departed NPC's stat-modifier entry (e.g. after /kill)
-    // the same way onLeave below does for players - avoids repeating the
-    // exact "leaked server-only component keyed by a removed entity"
-    // class of bug this project already hit once with npcContactCooldown.
+    // Cleans up a departed NPC's stat-modifier entry (e.g. after /kill
+    // or being defeated in combat) the same way onLeave below does for
+    // players - avoids repeating the exact "leaked server-only component
+    // keyed by a removed entity" class of bug this project already hit
+    // once with npcContactCooldown.
     this.state.npcs.onRemove((npc) => this.statsSystem.unregister(npc.id));
 
     this.setSimulationInterval((deltaTime) => this.world.update(deltaTime / 1000), SIMULATION_TICK_MS);
     this.clock.setInterval(() => this.levelingSystem.grantPassiveTick(), XP_TICK_MS);
     this.clock.setInterval(() => this.npcSpawnSystem.tick(), NPC_SPAWN_CHECK_INTERVAL_MS);
 
+    // "move" - continuous input-state changes. Wrapped as the
+    // "move-intent" command (see moveIntentCommand.ts).
     this.onMessage(
       "move",
       (
         client,
-        input: { up: boolean; down: boolean; left: boolean; right: boolean; seq?: number }
+        payload: { up: boolean; down: boolean; left: boolean; right: boolean; seq?: number }
       ) => {
-        const player = this.state.players.get(client.sessionId);
-        if (!player) return;
-        player.inputUp = !!input.up;
-        player.inputDown = !!input.down;
-        player.inputLeft = !!input.left;
-        player.inputRight = !!input.right;
-
-        if (typeof input.seq === "number") {
-          client.send("move-ack", { seq: input.seq, x: player.x, y: player.y });
-        }
+        this.gameCommands.dispatch(
+          this.world,
+          client.sessionId,
+          "move-intent",
+          payload,
+          (type, msg) => this.broadcast(type, msg),
+          (type, msg) => client.send(type, msg),
+          payload?.seq
+        );
       }
     );
 
+    // "set-target" - click/TAB target requests. Wrapped as the
+    // "set-target" command (see setTargetCommand.ts).
     this.onMessage(
       "set-target",
       (client, payload: { targetId?: string | null; targetType?: TargetType | null }) => {
-        const player = this.state.players.get(client.sessionId);
-        if (!player) return;
-        this.targetingSystem.setTarget(player, payload?.targetId ?? null, payload?.targetType ?? null);
+        this.gameCommands.dispatch(
+          this.world,
+          client.sessionId,
+          "set-target",
+          payload,
+          (type, msg) => this.broadcast(type, msg),
+          (type, msg) => client.send(type, msg)
+        );
       }
     );
+
+    // "attack" - new: a discrete melee attack against the player's
+    // current target. Wrapped as the "attack" command (see
+    // attackCommand.ts / CombatSystem.ts). Payload is intentionally
+    // empty - see attackCommand.ts's doc comment for why.
+    this.onMessage("attack", (client, payload: Record<string, never>) => {
+      this.gameCommands.dispatch(
+        this.world,
+        client.sessionId,
+        "attack",
+        payload ?? {},
+        (type, msg) => this.broadcast(type, msg),
+        (type, msg) => client.send(type, msg)
+      );
+    });
 
     this.onMessage("chat", async (client, payload: { text?: string }) => {
       const player = this.state.players.get(client.sessionId);
@@ -199,6 +255,8 @@ export class OverworldRoom extends Room<OverworldState> {
       this.chatRateLimiter.remove(client.sessionId);
       this.npcContactSystem.clearFor(client.sessionId);
       this.statsSystem.unregister(client.sessionId);
+      this.combatSystem.clearFor(client.sessionId);
+      commandLog.clearFor(client.sessionId);
 
       this.state.players.forEach((otherPlayer) => {
         if (otherPlayer.targetType === "player" && otherPlayer.targetId === client.sessionId) {
