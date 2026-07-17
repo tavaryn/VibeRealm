@@ -56,4 +56,14 @@ export class NetworkManager {
   sendSetTarget(targetId: string | null, targetType: TargetType | null) {
     this.room?.send("set-target", { targetId, targetType });
   }
+
+  // Requests a melee attack against whatever the player's own
+  // server-confirmed target currently is - no target info is sent here
+  // on purpose (see server/src/ecs/commands/handlers/attackCommand.ts).
+  // The server silently ignores this if there's no valid target, the
+  // target's out of range, or the attack is on cooldown - safe to call
+  // repeatedly (e.g. while a key is held) without any client-side gating.
+  sendAttack() {
+    this.room?.send("attack", {});
+  }
 }

@@ -59,8 +59,8 @@ export class GameScene extends Phaser.Scene {
 
   // True only between a successful room join and that room disconnecting
   // (see connectToServer/handleDisconnect). Gates the whole per-frame game
-  // loop (see update()) and outbound target/chat sends, so nothing tries
-  // to talk to a closed/absent room while the login screen is showing.
+  // loop (see update()) and outbound target/chat/attack sends, so nothing
+  // tries to talk to a closed/absent room while the login screen is showing.
   private isConnected = false;
 
   // Mirrors the local player's own synced targetId/targetType (updated via
@@ -69,6 +69,17 @@ export class GameScene extends Phaser.Scene {
   // fully server-authoritative, no optimistic client-side guessing.
   private currentTargetId = "";
   private currentTargetType: TargetType | "" = "";
+
+  // --- Attack input state ---
+  // "F" is bound to attack. Held-down auto-repeats an attack request on a
+  // short local throttle - the server's own cooldown (see CombatSystem.ts)
+  // is what actually gates whether an attack lands, so this throttle only
+  // needs to be "frequent enough to feel responsive," not tuned to match
+  // the server's exact cooldown value (avoiding yet another client/server
+  // duplicated-constant, the way movement speed/tick rate already are).
+  private attackKey!: Phaser.Input.Keyboard.Key;
+  private lastAttackSendAt = 0;
+  private static readonly ATTACK_RESEND_INTERVAL_MS = 250;
 
   // --- Client-side prediction state (local player only) ---
   // predictedX/Y is what actually drives the local player's on-screen
@@ -136,6 +147,7 @@ export class GameScene extends Phaser.Scene {
       S: this.input.keyboard!.addKey("S"),
       D: this.input.keyboard!.addKey("D"),
     };
+    this.attackKey = this.input.keyboard!.addKey("F");
 
     // TAB-cycle targeting. addCapture() tells Phaser to intercept this key
     // at the native DOM level immediately, synchronously preventing the
@@ -252,8 +264,8 @@ export class GameScene extends Phaser.Scene {
           visual.label.setText(`${npc.name} (Lv.${npc.level})`);
 
           // If this NPC is our current target, its hp/level may have just
-          // changed (future combat) - refresh immediately rather than
-          // waiting for the next frame's poll.
+          // changed (combat) - refresh immediately rather than waiting
+          // for the next frame's poll.
           if (this.currentTargetType === "npc" && this.currentTargetId === npcId) {
             this.refreshTargetFrame();
           }
@@ -268,8 +280,7 @@ export class GameScene extends Phaser.Scene {
         }
         // Don't clear currentTarget* here - the server already clears a
         // player's target when the targeted entity goes away (players, on
-        // leave). NPCs don't currently despawn, but if they do later, the
-        // next refreshTargetFrame() call will safely no-op on a missing id.
+        // leave; NPCs, on being defeated in combat - see CombatSystem).
       });
 
       room.onMessage("level-up", (msg: { username: string; level: number }) => {
@@ -286,6 +297,26 @@ export class GameScene extends Phaser.Scene {
           if (msg.sessionId !== this.localSessionId) return; // only react to our own contact
           const prefix = msg.isHostile ? "⚔️ " : "";
           this.showToast(`${prefix}Bumped into ${msg.npcName}!`, msg.isHostile ? "211,47,47" : "255,179,0");
+        }
+      );
+
+      // New: combat feedback. Only our own attacks show a toast (avoids
+      // spamming everyone's screen every time anyone anywhere hits a mob) -
+      // the HP bar on the target frame updates on its own via the NPC's
+      // synced hp field regardless of who's watching.
+      room.onMessage(
+        "combat-event",
+        (msg: { attackerSessionId: string; npcId: string; npcName: string; damage: number }) => {
+          if (msg.attackerSessionId !== this.localSessionId) return;
+          this.showToast(`Hit ${msg.npcName} for ${msg.damage}!`, "255,138,101");
+        }
+      );
+
+      room.onMessage(
+        "npc-defeated",
+        (msg: { npcId: string; npcName: string; killedBySessionId: string }) => {
+          if (msg.killedBySessionId !== this.localSessionId) return;
+          this.showToast(`Defeated ${msg.npcName}!`, "129,199,132");
         }
       );
 
@@ -343,6 +374,7 @@ export class GameScene extends Phaser.Scene {
     this.serverY = 0;
     this.inputSeq = 0;
     this.inputHistory = [];
+    this.lastAttackSendAt = 0;
 
     // Clear the stale username/level so it doesn't linger under the login
     // overlay showing the previous session's info.
@@ -523,7 +555,7 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  update(_time: number, delta: number) {
+  update(time: number, delta: number) {
     // While the login screen is up (initial load, or after a disconnect),
     // there's no room to simulate against - skip the whole game loop
     // rather than letting handleInput/stepPrediction/etc. run against
@@ -531,6 +563,7 @@ export class GameScene extends Phaser.Scene {
     if (!this.isConnected) return;
 
     this.handleInput();
+    this.handleAttackInput(time);
     this.stepPrediction(delta);
     this.interpolateVisuals();
     this.refreshTargetFrame();
@@ -572,6 +605,23 @@ export class GameScene extends Phaser.Scene {
       // (which will all have used the NEW input) on top of the server's
       // confirmed position. See predictedMovement.ts's header comment.
       this.network.sendInput(input, this.inputSeq);
+    }
+  }
+
+  // Attack input: "F" held down auto-repeats an attack request on a short
+  // local throttle, only while we actually have an NPC targeted. The
+  // server is what ultimately decides whether an attack lands (range,
+  // cooldown, target validity - see CombatSystem.canAttack) so this is
+  // deliberately permissive/optimistic on the client side; spamming
+  // requests the server will just reject is cheap and safe.
+  private handleAttackInput(now: number) {
+    if (!this.isConnected || this.chatUI.isFocused()) return;
+    if (!this.attackKey.isDown) return;
+    if (this.currentTargetType !== "npc" || !this.currentTargetId) return;
+
+    if (now - this.lastAttackSendAt >= GameScene.ATTACK_RESEND_INTERVAL_MS) {
+      this.lastAttackSendAt = now;
+      this.network.sendAttack();
     }
   }
 

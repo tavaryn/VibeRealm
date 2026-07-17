@@ -1,4 +1,5 @@
 import { Schema, type } from "@colyseus/schema";
+import { StatsComponent } from "./StatsComponent";
 
 /**
  * Player schema - core per-player synced state.
@@ -32,7 +33,7 @@ export class Player extends Schema {
   @type("number") xp = 0;
   @type("number") hp = 100;
   @type("number") maxHp = 100;
-  @type({ map: "number" }) stats = new Map<string, number>();
+  @type(StatsComponent) stats = new StatsComponent();   // was: @type({ map: "number" }) stats = new Map<string, number>();
 
   // "" = no target. Empty string instead of null/undefined since Schema
   // string fields don't support null.

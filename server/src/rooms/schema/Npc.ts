@@ -1,4 +1,5 @@
 import { Schema, type } from "@colyseus/schema";
+import { StatsComponent } from "./StatsComponent";
 
 /**
  * NPC schema. `targetId`/`targetType` are intentionally NOT @type-decorated
@@ -21,7 +22,7 @@ export class Npc extends Schema {
   @type("number") hp = 50;
   @type("number") maxHp = 50;
   @type("boolean") isHostile = true;
-  @type({ map: "number" }) stats = new Map<string, number>();
+  @type(StatsComponent) stats = new StatsComponent();   // was: @type({ map: "number" }) stats = new Map<string, number>();
   @type("string") behavior = "static";
 
   // Server-only, unsynced:

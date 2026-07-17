@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { DEFAULT_CHARACTER_TEMPLATE } from "../data/characterTemplates";
+import { StatName } from "../data/statDefinitions";
 
 /**
  * Minimal username-based persistence for the MVP: level/xp/stats saved to
@@ -13,14 +14,15 @@ import { DEFAULT_CHARACTER_TEMPLATE } from "../data/characterTemplates";
  * runtime *persistence* folder - unrelated to server/src/data/, the
  * static game-design data layer. Same word, different job.
  *
- * Combat MVP (v0.9): `stats` shape changed from `{ power }` to
- * `{ strength, dexterity, armor }` - see data/characterTemplates.ts.
+ * `stats` mirrors the Core Stats System's full StatName set (strength/
+ * dexterity/willpower/charisma/luck - see data/statDefinitions.ts),
+ * matching DEFAULT_CHARACTER_TEMPLATE's shape in characterTemplates.ts.
  */
 export interface SavedPlayerData {
   username: string;
   level: number;
   xp: number;
-  stats?: { strength: number; dexterity: number; armor: number };
+  stats?: Record<StatName, number>;
 }
 
 const DATA_DIR = path.join(__dirname, "..", "..", "data");
